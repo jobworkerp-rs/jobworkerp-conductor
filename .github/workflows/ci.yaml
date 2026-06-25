@@ -1,0 +1,93 @@
+name: CI
+
+# Runs for pull requests against the public GitHub repository. Jobs execute
+# directly on the runner host (no `container:`), so service containers are
+# reachable only via 127.0.0.1 + a mapped port, not by the service name.
+# The release / image-publish flow is in publish-image.yml; the normal
+# tag-sync path runs *those* tests, so this file is primarily a gate for
+# externally submitted pull requests.
+
+on:
+  pull_request:
+    branches:
+      - main
+
+env:
+  TEST_REDIS_URL: redis://127.0.0.1:6379
+  TEST_MYSQL_URL: mysql://mysql:mysqlpw@127.0.0.1:3306/test
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_USER: mysql
+          MYSQL_PASSWORD: mysqlpw
+          MYSQL_DATABASE: test
+          MYSQL_ROOT_PASSWORD: rootpw
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3306:3306
+        options: --health-cmd "mysqladmin ping -h 127.0.0.1 -P 3306 -uroot -prootpw" --health-interval 10s --health-timeout 5s --health-retries 20 --health-start-period 30s
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config clang liblzma-dev git git-lfs musl-tools \
+            build-essential mold clang cmake pkg-config protobuf-compiler openssl libssl-dev libclang-dev libudev-dev \
+            mariadb-client
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+
+#      - name: Setup Protocol Buffers
+#        uses: arduino/setup-protoc@v3
+#        with:
+#          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clean and build
+        run: |
+          cargo clean
+          cargo build --release
+
+      - name: Wait for MySQL to be ready
+        run: |
+          for i in {1..60}; do
+            if mysqladmin ping -h 127.0.0.1 -P 3306 -uroot -prootpw --silent 2>/dev/null; then
+              echo "MySQL is ready"
+              exit 0
+            fi
+            echo "Waiting for MySQL... ($i/60)"
+            sleep 2
+          done
+          echo "MySQL did not become ready in time" >&2
+          exit 1
+
+      - name: Initialize MySQL database
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -uroot -prootpw test < api/infra/sql/mysql/002_schema.sql
+          mysql -h 127.0.0.1 -P 3306 -uroot -prootpw -e "GRANT ALL PRIVILEGES ON test.* TO 'mysql'@'%'; FLUSH PRIVILEGES;"
+
+      - name: Run tests
+        run: cargo test --release -- --test-threads=1

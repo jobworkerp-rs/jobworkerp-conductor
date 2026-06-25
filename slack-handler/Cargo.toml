@@ -1,0 +1,49 @@
+[package]
+name = "slack-handler"
+version = "0.0.1"
+edition = "2021"
+
+#[lib]
+#crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "slack-handler"
+path = "src/main.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+command-utils = { path = "../modules/command-utils" }
+jobworkerp-client = { path = "../modules/jobworkerp-client" }
+jobworkerp-slack = { path = "../jobworkerp-slack" }
+# jobworkerp-handler = { path = "../jobworkerp-handler" }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+dotenvy = { workspace = true }
+envy = { workspace = true }
+hyper = { version = "1" }
+hyper-rustls = "0.27"
+num-traits = { workspace = true }
+once_cell = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+rsb_derive = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+slack-morphism = { version = "2", features = ["hyper"] } # "axum"
+# Workaround: slack-morphism 2.19.0 omits TLS feature for tokio-tungstenite
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+
+
+[build-dependencies]
+prost-build = { workspace = true }

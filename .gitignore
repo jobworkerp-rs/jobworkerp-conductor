@@ -1,0 +1,12 @@
+^\._*
+target/
+*.sqlite3*
+.env
+workflows*.toml
+.serena/
+.vscode/
+examples/
+llm_prompt_worker.yaml
+log/
+mise.toml
+*.log

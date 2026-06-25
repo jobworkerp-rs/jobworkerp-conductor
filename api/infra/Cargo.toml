@@ -1,0 +1,49 @@
+[package]
+name = "infra"
+version = "0.0.1"
+authors = ["sutr"]
+edition = "2021"
+
+[dependencies]
+
+proto = { path = "../../proto" }
+shared = { path = "../../shared" }
+command-utils = { path = "../../modules/command-utils" }
+infra-utils = { path = "../../modules/infra-utils" }
+memory-utils = { path = "../../modules/memory-utils" }
+jobworkerp-handler = { path = "../../jobworkerp-handler" }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+envy = { workspace = true }
+itertools = { workspace = true }
+prost = { workspace = true }
+#prost-types = { workspace = true }
+redis = { workspace = true, features = ["tokio-comp", "r2d2", "streams"] }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tonic = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "parking_lot",
+] }
+toml = { workspace = true }
+url = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[features]
+mysql = ["infra-utils/mysql"]
+sqlite = []
+performance_tests = []
+integration_tests = []

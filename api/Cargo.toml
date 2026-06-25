@@ -1,0 +1,9 @@
+# API crate directory
+#
+# All crates are managed by the root Cargo.toml workspace
+#
+# Structure:
+# - proto/      Protocol Buffers definitions
+# - infra/      Database and infrastructure layer
+# - grpc-admin/ gRPC server implementation
+# - app/        Application layer

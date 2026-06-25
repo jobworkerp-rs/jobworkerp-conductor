@@ -1,0 +1,57 @@
+[package]
+name = "conductor-main"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+
+[dependencies]
+command-utils = { path = "../modules/command-utils" }
+jobworkerp-client = { path = "../modules/jobworkerp-client" }
+jobworkerp-handler = { path = "../jobworkerp-handler" }
+proto = { path = "../proto" }
+infra = { path = "../api/infra" }
+app = { path = "../api/app" }
+grpc-admin = { path = "../api/grpc-admin" }
+shared = { path = "../shared" }
+infra-utils = { path = "../modules/infra-utils" }
+memory-utils = { path = "../modules/memory-utils" }
+jobworkerp-conductor = { path = "../jobworkerp-conductor" }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+dotenvy = { workspace = true }
+envy = { workspace = true }
+#hyper = { workspace = true }
+#hyper-rustls = { workspace = true }
+num-traits = { workspace = true }
+once_cell = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+rustls = { workspace = true, default-features = false, features = [
+    "ring",
+    "logging",
+    "std",
+    "tls12",
+] }
+rsb_derive = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+stretto = { workspace = true }
+#slack-morphism = { workspace = true }
+tokio = { workspace = true }
+tokio-cron-scheduler = { workspace = true, features = ["signal"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+
+#[build-dependencies]
+#prost-build = { workspace = true }
