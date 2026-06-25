@@ -1,0 +1,44 @@
+GRPC_ADDR="0.0.0.0:9000"
+
+# use database (if false, work without database.)
+#USE_DATABASE=true
+
+# for sqlx
+DATABASE_URL=mysql://mysql:mysql@db:3306/test
+
+# app (docker service)
+#MYSQL_HOST= "db"
+#MYSQL_PORT= "3306"
+#MYSQL_USER= "mysql"
+#MYSQL_PASSWORD= "mysql"
+#MYSQL_DBNAME= "test"
+
+# app (docker service)
+MYSQL_HOST= "db"
+MYSQL_PORT= "3306"
+MYSQL_USER= "mysql"
+MYSQL_PASSWORD= "mysql"
+MYSQL_DBNAME= "test"
+MYSQL_MAX_CONNECTIONS=20
+
+## dbname = file path for sqlite
+#SQLITE_HOST= ""
+#SQLITE_PORT= ""
+#SQLITE_USER= ""
+#SQLITE_PASSWORD= ""
+#SQLITE_DBNAME="db/test.sqlite3"
+
+REDIS_URL="redis://redis:6379"
+REDIS_WAIT_TIMEOUT_MSEC=500
+REDIS_USERNAME=""
+REDIS_PASSWORD=""
+REDIS_TRACING=true
+REDIS_PIPELINE=false
+REDIS_POOL_SIZE=10
+
+MEMORY_CACHE_NUM_COUNTERS=12960
+MEMORY_CACHE_MAX_COST=1000000
+MEMORY_CACHE_USE_METRICS=true
+
+# JAEGER_ADDR=jaeger:6831
+

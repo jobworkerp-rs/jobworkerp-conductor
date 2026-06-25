@@ -1,0 +1,2 @@
+ALTER TABLE `cron_scheduler` ADD COLUMN `worker_name` VARCHAR(255) DEFAULT NULL;
+ALTER TABLE `cron_scheduler` ADD COLUMN `using` VARCHAR(255) DEFAULT NULL;

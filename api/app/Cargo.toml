@@ -1,0 +1,30 @@
+[package]
+name = "app"
+version = "0.0.1"
+authors = ["sutr"]
+edition = "2021"
+
+[dependencies]
+
+proto = { path = "../../proto" }
+command-utils = { path = "../../modules/command-utils" }
+infra-utils = { path = "../../modules/infra-utils" }
+memory-utils = { path = "../../modules/memory-utils" }
+infra = { path = "../infra" }
+shared = { path = "../../shared" }
+jobworkerp-conductor = { path = "../../jobworkerp-conductor" }
+jobworkerp-client = { path = "../../modules/jobworkerp-client" }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+envy = { workspace = true }
+regex = { workspace = true }
+stretto = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+sqlx = { workspace = true }
+tokio = { workspace = true }
+
+[features]
+mysql = ["infra/mysql", "infra-utils/mysql"]

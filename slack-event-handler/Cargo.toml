@@ -1,0 +1,32 @@
+[package]
+name = "slack-event-handler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Internal dependencies
+proto = { path = "../proto" }
+shared = { path = "../shared" }
+jobworkerp-client = { path = "../modules/jobworkerp-client" }
+# jobworkerp-util = { path = "../modules/jobworkerp-util" }
+
+# Slack integration
+slack-morphism = { version = "2", features = ["hyper"] }
+# Workaround: slack-morphism 2.19.0 omits TLS feature for tokio-tungstenite
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+# rustls CryptoProvider (required for rustls 0.23+)
+rustls = { version = "0.23", features = ["ring"] }
+
+# Core dependencies
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

@@ -1,0 +1,52 @@
+[package]
+name = "grpc-admin"
+version = "0.0.1"
+authors = ["sutr"]
+edition = "2021"
+
+[[bin]]
+name = "front"
+path = "src/bin/front.rs"
+
+[dependencies]
+
+proto = { path = "../../proto" }
+shared = { path = "../../shared" }
+command-utils = { path = "../../modules/command-utils" }
+infra-utils = { path = "../../modules/infra-utils" }
+net-utils = { path = "../../modules/net-utils" }
+infra = { path = "../infra" }
+app = { path = "../app" }
+
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+debug_stub_derive = { workspace = true }
+dotenvy = { workspace = true }
+futures = { workspace = true, features = ["alloc"] }
+prost = { workspace = true }
+prost-types = { workspace = true }
+sqlx = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+tonic-reflection = { workspace = true }
+tonic-health = { workspace = true }
+tonic-web = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "parking_lot",
+] }
+tracing = { workspace = true }
+#tracing-attributes = { workspace = true }
+#tracing-futures = { workspace = true }
+tracing-subscriber = { workspace = true, features = [
+    "tracing-log",
+    "env-filter",
+] }
+
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }

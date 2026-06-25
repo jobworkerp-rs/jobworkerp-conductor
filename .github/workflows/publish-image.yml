@@ -1,0 +1,165 @@
+name: Publish Image
+
+# Triggered on the public GitHub repository when a release tag is pushed
+# (the internal gitea `publish-public.yml` mirrors the tree and pushes the
+# tag here). Runs the full test suite as a gate, then builds the
+# conductor-main image and publishes it to GitHub Container Registry
+# (ghcr.io).
+#
+# This is the primary place tests run for the public repository: the
+# PR-triggered ci.yaml only fires on external pull requests, so the normal
+# tag-sync flow relies on the test job here. The image is published only if
+# the test job passes, and the result is visible on the Actions run for the
+# release tag — so consumers can see each published image was built from a
+# tested commit. Tests run exactly once here (ci.yaml does not fire on tag
+# pushes), so there is no duplicate run or flaky double-gating.
+#
+# Jobs run directly on the runner host (no `container:`), so service
+# containers are reachable only via 127.0.0.1 + a mapped port, not by the
+# service name — hence the explicit `ports:` and 127.0.0.1 TEST_* URLs.
+
+on:
+  push:
+    tags:
+      - '*'
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_USER: mysql
+          MYSQL_PASSWORD: mysqlpw
+          MYSQL_DATABASE: conductor_test
+          MYSQL_ROOT_PASSWORD: rootpw
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3306:3306
+        options: --health-cmd "mysqladmin ping -h 127.0.0.1 -P 3306 -uroot -prootpw" --health-interval 10s --health-timeout 5s --health-retries 20 --health-start-period 30s
+
+    env:
+      TEST_REDIS_URL: redis://127.0.0.1:6379
+      TEST_MYSQL_URL: mysql://mysql:mysqlpw@127.0.0.1:3306/conductor_test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config clang liblzma-dev git git-lfs musl-tools \
+            build-essential mold clang cmake pkg-config protobuf-compiler openssl libssl-dev libclang-dev libudev-dev \
+            mariadb-client musl-dev perl make
+
+      - name: Setup Rust with musl target
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: x86_64-unknown-linux-musl
+          cache: true
+
+      - name: Wait for MySQL to be ready
+        run: |
+          for i in {1..60}; do
+            if mysqladmin ping -h 127.0.0.1 -P 3306 -uroot -prootpw --silent 2>/dev/null; then
+              echo "MySQL is ready"
+              exit 0
+            fi
+            echo "Waiting for MySQL... ($i/60)"
+            sleep 2
+          done
+          echo "MySQL did not become ready in time" >&2
+          exit 1
+
+      - name: Initialize MySQL database
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -uroot -prootpw conductor_test < api/infra/sql/mysql/002_schema.sql
+          mysql -h 127.0.0.1 -P 3306 -uroot -prootpw -e "GRANT ALL PRIVILEGES ON conductor_test.* TO 'mysql'@'%'; FLUSH PRIVILEGES;"
+
+      - name: Build (musl + mysql features)
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl --features mysql
+
+      - name: Run tests (musl + mysql features)
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: |
+          cargo test --target x86_64-unknown-linux-musl --features mysql -- --test-threads=1
+
+      - name: Upload musl release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: conductor-main-musl
+          path: target/x86_64-unknown-linux-musl/release/conductor-main
+          retention-days: 1
+          if-no-files-found: error
+
+  build-and-publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download musl release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: conductor-main-musl
+          path: target/x86_64-unknown-linux-musl/release
+
+      - name: Restore binary permissions
+        run: chmod +x target/x86_64-unknown-linux-musl/release/conductor-main
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image (conductor-main)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: conductor-main/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
