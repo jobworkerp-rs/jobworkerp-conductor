@@ -12,7 +12,7 @@ use proto::jobworkerp_conductor::data::{
 };
 use shared::notification::service::ConfigChangeNotificationService;
 use std::{sync::Arc, time::Duration};
-use stretto::AsyncCache;
+use stretto::TokioCache;
 
 #[async_trait]
 pub trait JobworkerpServerApp:
@@ -69,7 +69,7 @@ pub trait JobworkerpServerApp:
 }
 pub struct JobworkerpServerAppImpl {
     jobworkerp_server_repository: JobworkerpServerRepositoryImpl,
-    memory_cache: AsyncCache<Arc<String>, JobworkerpServer>,
+    memory_cache: TokioCache<Arc<String>, JobworkerpServer>,
     key_lock: RwLockWithKey<Arc<String>>,
     default_ttl: Duration,
     // 🚀 Phase 4: 通知サービス（コンストラクタ注入）
@@ -80,7 +80,7 @@ impl JobworkerpServerAppImpl {
     const DEFAULT_TTL_SEC: u64 = 60; // XXX fix it
     pub fn new(
         jobworkerp_server_repository: JobworkerpServerRepositoryImpl,
-        memory_cache: AsyncCache<Arc<String>, JobworkerpServer>,
+        memory_cache: TokioCache<Arc<String>, JobworkerpServer>,
         notification_service: Arc<dyn ConfigChangeNotificationService>,
     ) -> Self {
         Self {
@@ -278,7 +278,7 @@ impl JobworkerpServerApp for JobworkerpServerAppImpl {
 }
 
 impl UseMemoryCache<Arc<String>, JobworkerpServer> for JobworkerpServerAppImpl {
-    fn cache(&self) -> &AsyncCache<Arc<String>, JobworkerpServer> {
+    fn cache(&self) -> &TokioCache<Arc<String>, JobworkerpServer> {
         &self.memory_cache
     }
     #[doc = " default cache ttl"]

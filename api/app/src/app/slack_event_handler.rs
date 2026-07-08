@@ -16,7 +16,7 @@ use proto::jobworkerp_conductor::data::{
 use regex::RegexBuilder;
 use shared::notification::service::ConfigChangeNotificationService;
 use std::{sync::Arc, time::Duration};
-use stretto::AsyncCache;
+use stretto::TokioCache;
 
 #[async_trait]
 pub trait SlackEventHandlerApp:
@@ -82,7 +82,7 @@ pub trait SlackEventHandlerApp:
 pub struct SlackEventHandlerAppImpl {
     slack_event_handler_repository: SlackEventHandlerRepositoryImpl,
     jobworkerp_server_repository: JobworkerpServerRepositoryImpl,
-    memory_cache: AsyncCache<Arc<String>, SlackEventHandler>,
+    memory_cache: TokioCache<Arc<String>, SlackEventHandler>,
     key_lock: RwLockWithKey<Arc<String>>,
     default_ttl: Duration,
     notification_service: Arc<dyn ConfigChangeNotificationService>,
@@ -94,7 +94,7 @@ impl SlackEventHandlerAppImpl {
     pub fn new(
         slack_event_handler_repository: SlackEventHandlerRepositoryImpl,
         jobworkerp_server_repository: JobworkerpServerRepositoryImpl,
-        memory_cache: AsyncCache<Arc<String>, SlackEventHandler>,
+        memory_cache: TokioCache<Arc<String>, SlackEventHandler>,
         notification_service: Arc<dyn ConfigChangeNotificationService>,
     ) -> Self {
         Self {
@@ -478,7 +478,7 @@ impl SlackEventHandlerApp for SlackEventHandlerAppImpl {
 }
 
 impl UseMemoryCache<Arc<String>, SlackEventHandler> for SlackEventHandlerAppImpl {
-    fn cache(&self) -> &AsyncCache<Arc<String>, SlackEventHandler> {
+    fn cache(&self) -> &TokioCache<Arc<String>, SlackEventHandler> {
         &self.memory_cache
     }
 

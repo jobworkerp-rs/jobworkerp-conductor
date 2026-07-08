@@ -13,7 +13,7 @@ use crate::service::slack_event_handler::SlackEventHandlerGrpcImpl;
 use crate::service::worker_result_handler::WorkerResultHandlerGrpcImpl;
 use anyhow::Result;
 use app::module::AppModule;
-use net_utils::grpc::enable_grpc_web;
+use grpc_utils::enable_grpc_web;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;

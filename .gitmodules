@@ -10,6 +10,3 @@
 [submodule "modules/memory-utils"]
 	path = modules/memory-utils
 	url = https://github.com/sutr-app/memory-utils.git
-[submodule "modules/net-utils"]
-	path = modules/net-utils
-	url = https://github.com/sutr-app/net-utils.git

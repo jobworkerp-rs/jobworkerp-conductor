@@ -14,7 +14,6 @@ proto = { path = "../../proto" }
 shared = { path = "../../shared" }
 command-utils = { path = "../../modules/command-utils" }
 infra-utils = { path = "../../modules/infra-utils" }
-net-utils = { path = "../../modules/net-utils" }
 infra = { path = "../infra" }
 app = { path = "../app" }
 
@@ -24,6 +23,7 @@ async-stream = { workspace = true }
 debug_stub_derive = { workspace = true }
 dotenvy = { workspace = true }
 futures = { workspace = true, features = ["alloc"] }
+grpc-utils = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 sqlx = { workspace = true }

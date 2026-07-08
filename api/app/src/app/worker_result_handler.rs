@@ -13,7 +13,7 @@ use proto::jobworkerp_conductor::data::{
 };
 use shared::notification::service::ConfigChangeNotificationService;
 use std::{sync::Arc, time::Duration};
-use stretto::AsyncCache;
+use stretto::TokioCache;
 
 #[async_trait]
 pub trait WorkerResultHandlerApp:
@@ -71,7 +71,7 @@ pub trait WorkerResultHandlerApp:
 }
 pub struct WorkerResultHandlerAppImpl {
     worker_result_handler_repository: WorkerResultHandlerRepositoryImpl,
-    memory_cache: AsyncCache<Arc<String>, WorkerResultHandler>,
+    memory_cache: TokioCache<Arc<String>, WorkerResultHandler>,
     key_lock: RwLockWithKey<Arc<String>>,
     default_ttl: Duration,
     // 🚀 Phase 4: 通知サービス（コンストラクタ注入）
@@ -82,7 +82,7 @@ impl WorkerResultHandlerAppImpl {
     const DEFAULT_TTL_SEC: u64 = 60; // XXX fix it
     pub fn new(
         worker_result_handler_repository: WorkerResultHandlerRepositoryImpl,
-        memory_cache: AsyncCache<Arc<String>, WorkerResultHandler>,
+        memory_cache: TokioCache<Arc<String>, WorkerResultHandler>,
         notification_service: Arc<dyn ConfigChangeNotificationService>,
     ) -> Self {
         Self {
@@ -298,7 +298,7 @@ impl WorkerResultHandlerApp for WorkerResultHandlerAppImpl {
 }
 
 impl UseMemoryCache<Arc<String>, WorkerResultHandler> for WorkerResultHandlerAppImpl {
-    fn cache(&self) -> &AsyncCache<Arc<String>, WorkerResultHandler> {
+    fn cache(&self) -> &TokioCache<Arc<String>, WorkerResultHandler> {
         &self.memory_cache
     }
     #[doc = " default cache ttl"]

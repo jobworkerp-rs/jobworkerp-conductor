@@ -10,7 +10,7 @@ use memory_utils::lock::RwLockWithKey;
 use proto::jobworkerp_conductor::data::{CronScheduler, CronSchedulerData, CronSchedulerId};
 use shared::notification::service::ConfigChangeNotificationService;
 use std::{sync::Arc, time::Duration};
-use stretto::AsyncCache;
+use stretto::TokioCache;
 
 #[async_trait]
 pub trait CronSchedulerApp:
@@ -69,7 +69,7 @@ pub trait CronSchedulerApp:
 }
 pub struct CronSchedulerAppImpl {
     cron_scheduler_repository: CronSchedulerRepositoryImpl,
-    memory_cache: AsyncCache<Arc<String>, CronScheduler>,
+    memory_cache: TokioCache<Arc<String>, CronScheduler>,
     key_lock: RwLockWithKey<Arc<String>>,
     default_ttl: Duration,
     // Phase 4: 通知サービス（コンストラクタ注入）
@@ -80,7 +80,7 @@ impl CronSchedulerAppImpl {
     const DEFAULT_TTL_SEC: u64 = 60; // XXX fix it
     pub fn new(
         cron_scheduler_repository: CronSchedulerRepositoryImpl,
-        memory_cache: AsyncCache<Arc<String>, CronScheduler>,
+        memory_cache: TokioCache<Arc<String>, CronScheduler>,
         notification_service: Arc<dyn ConfigChangeNotificationService>,
     ) -> Self {
         Self {
@@ -283,7 +283,7 @@ impl CronSchedulerApp for CronSchedulerAppImpl {
 }
 
 impl UseMemoryCache<Arc<String>, CronScheduler> for CronSchedulerAppImpl {
-    fn cache(&self) -> &AsyncCache<Arc<String>, CronScheduler> {
+    fn cache(&self) -> &TokioCache<Arc<String>, CronScheduler> {
         &self.memory_cache
     }
     #[doc = " default cache ttl"]
