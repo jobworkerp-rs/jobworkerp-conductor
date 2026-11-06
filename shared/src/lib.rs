@@ -1,5 +1,6 @@
 pub mod config_events;
 pub mod config_events_proto; // protobuf完全版
+pub mod execution_failure;
 pub mod execution_ref_recorder;
 pub mod initialization;
 pub mod local_config_store;

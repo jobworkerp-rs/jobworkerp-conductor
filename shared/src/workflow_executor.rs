@@ -1,7 +1,7 @@
 use anyhow::Result;
 use jobworkerp_client::client::helper::JobTerminalOutcome;
 use jobworkerp_client::client::wrapper::JobworkerpClientWrapper;
-use jobworkerp_client::jobworkerp::data::{JobId, ResultStatus};
+use jobworkerp_client::jobworkerp::data::{JobId, ResultStatus, StreamError};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -16,6 +16,23 @@ pub struct WorkflowExecutionOutcome {
     /// stored JobResult (worker `store_failure=false`, or a cancelled PENDING job).
     pub status: ResultStatus,
     pub output: serde_json::Value,
+    /// Cause of a failure as classified by jobworkerp. `None` on success and for failures of
+    /// unknown cause (older servers), so `success` / `status` decide the outcome.
+    pub error: Option<StreamError>,
+}
+
+impl WorkflowExecutionOutcome {
+    /// Log a failed terminal outcome. The client already describes a failure's classification
+    /// in `output`, so it is logged as is.
+    pub fn log_failure(&self, source: &str) {
+        tracing::warn!(
+            source,
+            job_id = ?self.job_id.map(|id| id.value),
+            status = self.status.as_str_name(),
+            output = %self.output,
+            "job reached a failed terminal state (job recorded for status tracking)"
+        );
+    }
 }
 
 impl From<JobTerminalOutcome<serde_json::Value>> for WorkflowExecutionOutcome {
@@ -25,6 +42,7 @@ impl From<JobTerminalOutcome<serde_json::Value>> for WorkflowExecutionOutcome {
             status: outcome.status,
             job_id: outcome.job_id,
             output: outcome.output,
+            error: outcome.error,
         }
     }
 }
@@ -97,11 +115,17 @@ pub async fn execute_workflow_stream_first(
     jobworkerp_endpoint: &str,
     args: Option<&str>,
     channel: Option<&str>,
+    job_timeout_sec: Option<u32>,
 ) -> Result<crate::execution_ref_recorder::EnqueuedJob> {
     let client_wrapper = JobworkerpClientWrapper::new(jobworkerp_endpoint, None).await?;
     let input = args.unwrap_or("{}");
     let (job_id, terminal) = client_wrapper
-        .execute_workflow_stream_first(workflow_url, input, channel)
+        .execute_workflow_stream_first_with_job_timeout(
+            workflow_url,
+            input,
+            channel,
+            job_timeout_sec,
+        )
         .await?;
     Ok(crate::execution_ref_recorder::EnqueuedJob::from_terminal(
         job_id, terminal,
@@ -115,6 +139,7 @@ pub async fn execute_worker_by_name_stream_first(
     jobworkerp_endpoint: &str,
     args: Option<&str>,
     using: Option<&str>,
+    job_timeout_sec: Option<u32>,
 ) -> Result<crate::execution_ref_recorder::EnqueuedJob> {
     let client_wrapper = JobworkerpClientWrapper::new(jobworkerp_endpoint, None).await?;
     // Args may contain user-supplied secrets (API keys, connection strings). Never log content,
@@ -152,7 +177,12 @@ pub async fn execute_worker_by_name_stream_first(
         "workflow_executor: parsed args_json kind / top-level keys"
     );
     let (job_id, terminal) = client_wrapper
-        .execute_worker_by_name_stream_first(worker_name, args_json, using)
+        .execute_worker_by_name_stream_first_with_job_timeout(
+            worker_name,
+            args_json,
+            using,
+            job_timeout_sec,
+        )
         .await?;
     Ok(crate::execution_ref_recorder::EnqueuedJob::from_terminal(
         job_id, terminal,
@@ -162,7 +192,7 @@ pub async fn execute_worker_by_name_stream_first(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jobworkerp_client::jobworkerp::data::ResultStatus;
+    use jobworkerp_client::jobworkerp::data::{ProblemDetails, StreamErrorCode};
 
     #[test]
     fn outcome_from_terminal_success_keeps_job_id_and_marks_success() {
@@ -170,12 +200,40 @@ mod tests {
             job_id: Some(JobId { value: 42 }),
             status: ResultStatus::Success,
             output: serde_json::json!({"ok": true}),
+            error: None,
         };
         let outcome: WorkflowExecutionOutcome = terminal.into();
         assert_eq!(outcome.job_id.map(|id| id.value), Some(42));
         assert!(outcome.success);
         assert_eq!(outcome.status, ResultStatus::Success);
         assert_eq!(outcome.output, serde_json::json!({"ok": true}));
+    }
+
+    fn workflow_timeout_error() -> StreamError {
+        StreamError {
+            code: StreamErrorCode::Timeout as i32,
+            message: "task timed out".to_string(),
+            origin: "WORKFLOW".to_string(),
+            problem: Some(ProblemDetails {
+                r#type: "https://open-workflow-specification.org/spec/1.0.0/errors/timeout"
+                    .to_string(),
+                status: 408,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn outcome_from_terminal_failure_carries_the_classification() {
+        let error = workflow_timeout_error();
+        let terminal = JobTerminalOutcome {
+            job_id: Some(JobId { value: 9 }),
+            status: ResultStatus::MaxRetry,
+            output: serde_json::Value::String("timed out".to_string()),
+            error: Some(error.clone()),
+        };
+        let outcome: WorkflowExecutionOutcome = terminal.into();
+        assert_eq!(outcome.error, Some(error));
     }
 
     // A terminal failure must still carry job_id so the executed job can be
@@ -186,6 +244,7 @@ mod tests {
             job_id: Some(JobId { value: 7 }),
             status: ResultStatus::ErrorAndRetry,
             output: serde_json::Value::String("boom".to_string()),
+            error: None,
         };
         let outcome: WorkflowExecutionOutcome = terminal.into();
         assert_eq!(outcome.job_id.map(|id| id.value), Some(7));

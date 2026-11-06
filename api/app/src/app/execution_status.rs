@@ -691,6 +691,7 @@ impl ExecutionStatusApp for ExecutionStatusAppImpl {
             endpoint: resolved.endpoint,
             target: resolved.target,
             args,
+            job_timeout_sec: resolved.job_timeout_sec,
         };
 
         // Enqueue and detach terminal monitoring; returns the immediate job_id (Some) or None for a

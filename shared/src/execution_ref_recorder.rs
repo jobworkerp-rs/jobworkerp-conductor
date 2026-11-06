@@ -1,3 +1,4 @@
+use crate::execution_failure::JobAlreadyEnqueued;
 use crate::workflow_executor::WorkflowExecutionOutcome;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -67,6 +68,10 @@ pub struct EnqueuedJob {
 impl EnqueuedJob {
     /// Build from a streaming-client terminal future whose outcome only needs `Into` conversion
     /// into `WorkflowExecutionOutcome`, boxing it for the type-erased `terminal` field.
+    ///
+    /// When `job_id` is known the job already exists, so a terminal error (e.g. a result stream
+    /// cut off before its End) is marked with [`JobAlreadyEnqueued`] to keep callers from
+    /// re-submitting a job that may still be running.
     pub fn from_terminal<T, Fut>(
         job_id: Option<jobworkerp_client::jobworkerp::data::JobId>,
         terminal: Fut,
@@ -75,9 +80,15 @@ impl EnqueuedJob {
         Fut: Future<Output = Result<T>> + Send + 'static,
         T: Into<WorkflowExecutionOutcome>,
     {
+        let marker = job_id.map(|id| JobAlreadyEnqueued { job_id: id.value });
         EnqueuedJob {
             job_id,
-            terminal: Box::pin(async move { terminal.await.map(Into::into) }),
+            terminal: Box::pin(async move {
+                terminal.await.map(Into::into).map_err(|e| match marker {
+                    Some(marker) => e.context(marker),
+                    None => e,
+                })
+            }),
         }
     }
 
@@ -144,7 +155,8 @@ where
                 }
             }
             Err(e) => {
-                if let Err(update_err) = recorder.update_enqueue_error(&id, &e.to_string()).await {
+                if let Err(update_err) = recorder.update_enqueue_error(&id, &format!("{e:#}")).await
+                {
                     tracing::warn!(
                         "Failed to update execution_ref enqueue_error: {}",
                         update_err
@@ -249,6 +261,7 @@ mod tests {
             success: true,
             status: ResultStatus::Success,
             output: serde_json::Value::Null,
+            error: None,
         };
         // Streaming runner: job_id known immediately, terminal outcome resolves later.
         let result = record_pending_then_update(&recorder, pending(), async {
@@ -296,6 +309,7 @@ mod tests {
             success: false,
             status: ResultStatus::FatalError,
             output: serde_json::Value::Null,
+            error: None,
         };
         // Direct-fallback path: no immediate job_id; it arrives only with the terminal outcome.
         let result = record_pending_then_update(&recorder, pending(), async {
@@ -345,6 +359,62 @@ mod tests {
             Call::UpdateEnqueueError { id, error } => {
                 assert_eq!(*id, 9);
                 assert!(error.contains("connection refused"));
+            }
+            other => panic!("expected UpdateEnqueueError, got {other:?}"),
+        }
+    }
+
+    async fn failed_terminal(message: &'static str) -> Result<WorkflowExecutionOutcome> {
+        Err(anyhow::anyhow!(message))
+    }
+
+    // Without a job_id (Direct fallback) the terminal error is left as is, so a connection failure
+    // there stays retriable.
+    #[tokio::test]
+    async fn from_terminal_without_job_id_leaves_errors_unmarked() {
+        let enqueued = EnqueuedJob::from_terminal(None, failed_terminal("boom"));
+        let err = enqueued.terminal.await.unwrap_err();
+        assert!(err.downcast_ref::<JobAlreadyEnqueued>().is_none());
+    }
+
+    // Once jobworkerp assigned a job_id the job exists, so a lost terminal result must be marked
+    // as already enqueued (never re-submitted) while keeping the original cause.
+    #[tokio::test]
+    async fn lost_result_after_job_id_records_cause_and_is_not_retriable() {
+        let rec = Arc::new(RecordingRecorder {
+            next_id: 12,
+            ..Default::default()
+        });
+        let recorder: SharedExecutionRefRecorder = rec.clone();
+        let result = record_pending_then_update(&recorder, pending(), async {
+            Ok(EnqueuedJob::from_terminal(
+                Some(JobId { value: 77 }),
+                async {
+                    Err::<WorkflowExecutionOutcome, _>(anyhow::Error::new(
+                        jobworkerp_client::error::ClientError::ExternalServiceError(
+                            "connection reset".to_string(),
+                        ),
+                    ))
+                },
+            ))
+        })
+        .await;
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<JobAlreadyEnqueued>(),
+            Some(&JobAlreadyEnqueued { job_id: 77 })
+        );
+        assert!(!crate::execution_failure::is_retriable_connection_failure(
+            &err
+        ));
+
+        let calls = rec.calls.lock().unwrap();
+        assert!(matches!(calls[1], Call::UpdateJobId { job_id: 77, .. }));
+        match &calls[2] {
+            Call::UpdateEnqueueError { id, error } => {
+                assert_eq!(*id, 12);
+                assert!(error.contains("job 77 was enqueued"), "{error}");
+                assert!(error.contains("connection reset"), "{error}");
             }
             other => panic!("expected UpdateEnqueueError, got {other:?}"),
         }

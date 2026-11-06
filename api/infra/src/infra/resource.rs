@@ -6,8 +6,6 @@ use infra_utils::infra::{
 };
 use sqlx::Pool;
 
-// TODO rename file
-const SQLITE_SCHEMA: &str = include_str!("../../sql/sqlite/002_schema.sql");
 static RDB_POOL: tokio::sync::OnceCell<Pool<Rdb>> = tokio::sync::OnceCell::const_new();
 
 pub async fn setup_rdb_by_env() -> &'static Pool<Rdb> {
@@ -21,13 +19,22 @@ pub async fn setup_rdb_by_env() -> &'static Pool<Rdb> {
 // (if need multiple database, add RDB_POOL and setup multiple)
 pub async fn setup_rdb(db_config: &RdbConfig) -> &'static Pool<Rdb> {
     sqlx::any::install_default_drivers();
-    RDB_POOL
-        .get_or_init(|| async {
-            infra_utils::infra::rdb::new_rdb_pool(db_config, Some(&SQLITE_SCHEMA.to_string()))
-                .await
-                .unwrap()
-        })
+    RDB_POOL.get_or_init(|| open_pool(db_config)).await
+}
+
+#[cfg(not(feature = "mysql"))]
+async fn open_pool(db_config: &RdbConfig) -> Pool<Rdb> {
+    super::sqlite_migration::open_migrated_pool(db_config)
         .await
+        .unwrap_or_else(|e| panic!("sqlite schema migration failed: {e:#}"))
+}
+
+// MySQL schemas are migrated by operators; see sql/migration/README.md.
+#[cfg(feature = "mysql")]
+async fn open_pool(db_config: &RdbConfig) -> Pool<Rdb> {
+    infra_utils::infra::rdb::new_rdb_pool(db_config, None)
+        .await
+        .unwrap()
 }
 
 pub fn load_db_url_config_from_env() -> Result<RdbConfig> {

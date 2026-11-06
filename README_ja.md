@@ -161,6 +161,8 @@ grpcurl -plaintext -d '{
 }' 127.0.0.1:9090 jobworkerp_conductor.service.CronSchedulerService/Create
 ```
 
+cron の `job_timeout_sec` は秒単位です。省略時は1200秒、`0` は無制限です。DB設定をTOMLでバックアップ・復元する場合もこの値が保持されます。この設定はlegacy TOML実行モードには適用されません。
+
 Slack message handler を作成します。
 
 ```bash
@@ -212,7 +214,9 @@ grpcurl -plaintext -d '{"limit": 100, "offset": 0}' \
 
 ## データベース
 
-SQLite は開発用途と単一プロセス運用のデフォルト選択です。SQLite schema はバイナリに埋め込まれ、起動時に適用されます。
+SQLite は開発用途と単一プロセス運用のデフォルト選択です。SQLite の schema は `api/infra/sql/sqlite/` の migration としてバイナリに埋め込まれ、起動時に未適用分が自動適用されます。適用が必要な既存データベースは、適用前に `<DBファイル>.pre-migration.bak` へ1世代バックアップされます。
+
+MySQL の既存データベースの schema 更新は起動時には適用されません。適用前にバックアップを取り、未適用の migration を確認してから、[DB migration手順](api/infra/sql/migration/README.md)に従ってください。
 
 MySQL を使う場合は、conductor 起動前に schema を初期化します。
 

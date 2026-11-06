@@ -6,6 +6,8 @@ pub mod module;
 pub mod notification;
 pub(in crate::infra) mod resource;
 pub mod slack_event_handler;
+#[cfg(not(feature = "mysql"))]
+pub(in crate::infra) mod sqlite_migration;
 pub mod worker_result_handler;
 
 use crate::error::UiEventHandlerError;

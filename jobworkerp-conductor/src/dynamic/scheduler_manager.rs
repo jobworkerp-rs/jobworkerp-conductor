@@ -219,6 +219,7 @@ impl DynamicSchedulerManager {
         let execution_target = data.execution_target.clone();
         let workflow_url_fallback = data.workflow_url.clone();
         let channel_fallback = data.channel.clone();
+        let job_timeout_sec = data.job_timeout_sec;
         let recorder = self.execution_ref_recorder.clone();
         let scheduler_id_value = scheduler_id.value;
         let jobworkerp_server_id_value = jobworkerp_server_id.value;
@@ -255,6 +256,7 @@ impl DynamicSchedulerManager {
                         endpoint: jobworkerp_endpoint.clone(),
                         target,
                         args: args.clone(),
+                        job_timeout_sec,
                     })
                     .await
                 };
@@ -275,14 +277,11 @@ impl DynamicSchedulerManager {
                     Ok(outcome) if outcome.success => {
                         tracing::info!("Successfully executed job: {}", job_name);
                     }
-                    Ok(_) => {
-                        tracing::warn!(
-                            "Cron job {} failed terminally (job recorded for status tracking)",
-                            job_name
-                        );
+                    Ok(outcome) => {
+                        outcome.log_failure(&format!("cron job '{job_name}'"));
                     }
                     Err(e) => {
-                        tracing::error!("Failed to enqueue job {}: {}", job_name, e);
+                        tracing::error!("Failed to enqueue job {}: {:#}", job_name, e);
                     }
                 }
             })
@@ -374,6 +373,7 @@ impl DynamicSchedulerManager {
             data.jobworkerp_server_id.hash(&mut hasher);
             data.enabled.hash(&mut hasher);
             data.args.hash(&mut hasher);
+            data.job_timeout_sec.hash(&mut hasher);
             match &data.execution_target {
                 Some(ExecutionTarget::Workflow(wf)) => {
                     "workflow".hash(&mut hasher);
@@ -459,6 +459,27 @@ mod tests {
     // Serialize env-var tests: they mutate process-global state and would
     // race with each other or with concurrent reads in other tests.
     static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    #[test]
+    fn cron_job_timeout_changes_and_clearing_config_hash() {
+        use proto::jobworkerp_conductor::data::{CronScheduler, CronSchedulerData};
+        let scheduler = |job_timeout_sec| CronScheduler {
+            data: Some(CronSchedulerData {
+                job_timeout_sec,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let default_hash = DynamicSchedulerManager::compute_config_hash(&scheduler(None));
+        assert_ne!(
+            default_hash,
+            DynamicSchedulerManager::compute_config_hash(&scheduler(Some(1)))
+        );
+        assert_ne!(
+            default_hash,
+            DynamicSchedulerManager::compute_config_hash(&scheduler(Some(0)))
+        );
+    }
 
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

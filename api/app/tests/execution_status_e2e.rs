@@ -16,7 +16,7 @@ use app::app::cron_scheduler::{CronSchedulerApp, CronSchedulerAppImpl};
 use app::app::execution_status::{DeleteResult, ExecutionStatusApp, ExecutionStatusAppImpl};
 use app::app::jobworkerp_server::{JobworkerpServerApp, JobworkerpServerAppImpl};
 use app::app::notification::ConfigChangeNotificationServiceImpl;
-use app::app::source_resolver::CronSourceResolver;
+use app::app::source_resolver::{CronSourceResolver, ExecutionSourceResolver};
 use infra::infra::cron_scheduler::rdb::CronSchedulerRepositoryImpl;
 use infra::infra::execution_ref::rdb::{ExecutionRefRepository, ExecutionRefRepositoryImpl};
 use infra::infra::jobworkerp_server::rdb::JobworkerpServerRepositoryImpl;
@@ -40,6 +40,7 @@ struct Harness {
     app: ExecutionStatusAppImpl,
     server_app: JobworkerpServerAppImpl,
     cron_app: Arc<CronSchedulerAppImpl>,
+    resolver: Arc<CronSourceResolver>,
     exec_repo: ExecutionRefRepositoryImpl,
     pool: &'static RdbPool,
 }
@@ -73,12 +74,13 @@ async fn setup() -> Harness {
         cron_app.clone(),
         server_repo.clone(),
     ));
-    let app = ExecutionStatusAppImpl::new(exec_repo.clone(), server_repo, resolver);
+    let app = ExecutionStatusAppImpl::new(exec_repo.clone(), server_repo, resolver.clone());
 
     Harness {
         app,
         server_app,
         cron_app,
+        resolver,
         exec_repo,
         pool,
     }
@@ -183,6 +185,7 @@ impl Harness {
                 created_at: now(),
                 updated_at: now(),
                 args: None,
+                job_timeout_sec: Some(5),
                 execution_target: Some(target),
             })
             .await
@@ -275,6 +278,28 @@ async fn delete_terminal_ref_succeeds() {
     assert_eq!(result, DeleteResult::Deleted);
     // Gone afterwards.
     assert!(h.app.find_execution_ref(&id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cron_source_resolver_carries_job_timeout_for_manual_execution() {
+    let h = setup().await;
+    let server = h.seed_server("127.0.0.1", "9000").await;
+    let source_id = h
+        .seed_cron(
+            &server,
+            ExecutionTarget::Worker(WorkerExecution {
+                worker_name: "manual-timeout-test".to_string(),
+                r#using: None,
+            }),
+        )
+        .await;
+
+    let resolved = h
+        .resolver
+        .resolve(ExecutionSourceType::CronScheduler, source_id)
+        .await
+        .expect("cron source should resolve without connecting to jobworkerp");
+    assert_eq!(Some(5), resolved.job_timeout_sec);
 }
 
 #[tokio::test]

@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use infra_utils::infra::rdb::Rdb;
 use infra_utils::infra::rdb::RdbPool;
 use infra_utils::infra::rdb::UseRdbPool;
-use itertools::Itertools;
 use proto::jobworkerp_conductor::data::cron_scheduler_data::ExecutionTarget;
 use proto::jobworkerp_conductor::data::{CronScheduler, CronSchedulerData, CronSchedulerId};
 use sqlx::Executor;
@@ -59,8 +58,9 @@ pub trait CronSchedulerRepository: UseRdbPool + UseIdGenerator + Sync + Send {
             `updated_at`,
             `args`,
             `worker_name`,
-            `using`
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            `using`,
+            `job_timeout_sec`
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(id)
         .bind(&cron_scheduler.name)
@@ -80,6 +80,7 @@ pub trait CronSchedulerRepository: UseRdbPool + UseIdGenerator + Sync + Send {
         .bind(&cron_scheduler.args)
         .bind(&db_worker_name)
         .bind(&db_using)
+        .bind(cron_scheduler.job_timeout_sec.map(i64::from))
         .execute(tx)
         .await;
         match res {
@@ -97,7 +98,7 @@ pub trait CronSchedulerRepository: UseRdbPool + UseIdGenerator + Sync + Send {
                     {
                         return Err(UiEventHandlerError::AlreadyExists(format!(
                             "CronScheduler name '{}' already exists",
-                            &cron_scheduler.name
+                            cron_scheduler.name
                         ))
                         .into());
                     }
@@ -128,7 +129,8 @@ pub trait CronSchedulerRepository: UseRdbPool + UseIdGenerator + Sync + Send {
             `updated_at` = ?,
             `args` = ?,
             `worker_name` = ?,
-            `using` = ?
+            `using` = ?,
+            `job_timeout_sec` = ?
             WHERE `id` = ?;",
         )
         .bind(&cron_scheduler.name)
@@ -148,6 +150,7 @@ pub trait CronSchedulerRepository: UseRdbPool + UseIdGenerator + Sync + Send {
         .bind(&cron_scheduler.args)
         .bind(&db_worker_name)
         .bind(&db_using)
+        .bind(cron_scheduler.job_timeout_sec.map(i64::from))
         .bind(id.value)
         .execute(tx)
         .await
@@ -177,13 +180,13 @@ pub trait CronSchedulerRepository: UseRdbPool + UseIdGenerator + Sync + Send {
     async fn find(&self, id: &CronSchedulerId) -> Result<Option<CronScheduler>> {
         self.find_row_tx(self.db_pool(), id)
             .await
-            .map(|r| r.map(|r2| r2.to_proto()))
+            .and_then(|r| r.map(|row| row.to_proto()).transpose())
     }
 
     async fn find_by_name(&self, name: &str) -> Result<Option<CronScheduler>> {
         self.find_by_name_tx(self.db_pool(), name)
             .await
-            .map(|r| r.map(|r2| r2.to_proto()))
+            .and_then(|r| r.map(|row| row.to_proto()).transpose())
     }
 
     async fn find_row_tx<'c, E: Executor<'c, Database = Rdb>>(
@@ -221,7 +224,7 @@ pub trait CronSchedulerRepository: UseRdbPool + UseIdGenerator + Sync + Send {
     ) -> Result<Vec<CronScheduler>> {
         self.find_row_list_tx(self.db_pool(), limit, offset)
             .await
-            .map(|r| r.iter().map(|r2| r2.to_proto()).collect_vec())
+            .and_then(|r| r.into_iter().map(|row| row.to_proto()).collect())
     }
 
     async fn find_row_list_tx<'c, E: Executor<'c, Database = Rdb>>(
@@ -287,6 +290,7 @@ impl UseIdGenerator for CronSchedulerRepositoryImpl {
 
 impl CronSchedulerRepository for CronSchedulerRepositoryImpl {}
 
+#[cfg(test)]
 mod test {
     use super::CronSchedulerRepository;
     use super::CronSchedulerRepositoryImpl;
@@ -300,6 +304,35 @@ mod test {
     use proto::jobworkerp_conductor::data::CronSchedulerData;
     use proto::jobworkerp_conductor::data::WorkerExecution;
     use proto::jobworkerp_conductor::data::WorkflowExecution;
+
+    #[cfg(not(feature = "mysql"))]
+    #[test]
+    fn sqlite_migration_preserves_existing_rows() -> Result<()> {
+        infra_utils::infra::test::TEST_RUNTIME.block_on(migration_preserves_existing_rows())
+    }
+
+    #[cfg(not(feature = "mysql"))]
+    async fn migration_preserves_existing_rows() -> Result<()> {
+        // Each pooled connection to `sqlite::memory:` opens a separate database.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql("CREATE TABLE cron_scheduler (id BIGINT PRIMARY KEY, name TEXT NOT NULL); INSERT INTO cron_scheduler VALUES (1, 'existing');")
+            .execute(&pool)
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../sql/migration/sqlite/004_add_job_timeout_sec.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        let row: (String, Option<i64>) =
+            sqlx::query_as("SELECT name, job_timeout_sec FROM cron_scheduler WHERE id = 1")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(("existing".to_string(), None), row);
+        Ok(())
+    }
 
     async fn _test_repository(pool: &'static RdbPool) -> Result<()> {
         let repository = CronSchedulerRepositoryImpl::new(IdGeneratorWrapper::new(), pool);
@@ -319,6 +352,7 @@ mod test {
             created_at: 0,
             updated_at: 0,
             args: Some(r#"{"test": "value"}"#.to_string()),
+            job_timeout_sec: Some(0),
             execution_target: Some(ExecutionTarget::Workflow(WorkflowExecution {
                 workflow_url: "hoge3".to_string(),
                 channel: Some("hoge4".to_string()),
@@ -339,6 +373,7 @@ mod test {
             &found_data.execution_target,
             Some(ExecutionTarget::Workflow(wf)) if wf.workflow_url == "hoge3"
         ));
+        assert_eq!(Some(0), found_data.job_timeout_sec);
 
         // Test 2: Update to worker execution mode
         tx = db.begin().await.context("error in test")?;
@@ -355,6 +390,7 @@ mod test {
             created_at: 0,
             updated_at: 0,
             args: Some(r#"{"updated": "args"}"#.to_string()),
+            job_timeout_sec: Some(u32::MAX),
             execution_target: Some(ExecutionTarget::Worker(WorkerExecution {
                 worker_name: "my-worker".to_string(),
                 r#using: Some("chat".to_string()),
@@ -371,6 +407,20 @@ mod test {
             &found_data.execution_target,
             Some(ExecutionTarget::Worker(w)) if w.worker_name == "my-worker" && w.r#using == Some("chat".to_string())
         ));
+        assert_eq!(Some(u32::MAX), found_data.job_timeout_sec);
+
+        let mut clear_timeout = update.clone();
+        clear_timeout.job_timeout_sec = None;
+        tx = db.begin().await.context("error in test")?;
+        repository.update(&mut *tx, &id1, &clear_timeout).await?;
+        tx.commit().await.context("error clearing timeout")?;
+        let found = repository.find(&id1).await?;
+        assert_eq!(
+            None,
+            found
+                .and_then(|scheduler| scheduler.data)
+                .and_then(|data| data.job_timeout_sec)
+        );
 
         let count = repository.count_list_tx(repository.db_pool()).await?;
         assert_eq!(1, count);
@@ -395,6 +445,7 @@ mod test {
             created_at: 0,
             updated_at: 0,
             args: None,
+            job_timeout_sec: None,
             execution_target: Some(ExecutionTarget::Worker(WorkerExecution {
                 worker_name: "cleanup-command".to_string(),
                 r#using: None,

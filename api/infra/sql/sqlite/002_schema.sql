@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS `cron_scheduler` (
     `args` TEXT DEFAULT NULL,
     `worker_name` TEXT DEFAULT NULL,
     `using` TEXT DEFAULT NULL,
+    `job_timeout_sec` BIGINT DEFAULT NULL,
     `created_at` BIGINT,
     `updated_at` BIGINT
 );

@@ -118,7 +118,7 @@ pub trait SlackEventHandlerRepository: UseRdbPool + UseIdGenerator + Sync + Send
                     {
                         return Err(UiEventHandlerError::AlreadyExists(format!(
                             "SlackEventHandler name '{}' already exists",
-                            &slack_event_handler.name
+                            slack_event_handler.name
                         ))
                         .into());
                     }

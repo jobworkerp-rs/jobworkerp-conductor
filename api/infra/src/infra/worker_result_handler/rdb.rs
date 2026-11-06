@@ -107,7 +107,7 @@ pub trait WorkerResultHandlerRepository: UseRdbPool + UseIdGenerator + Sync + Se
                     {
                         return Err(UiEventHandlerError::AlreadyExists(format!(
                             "WorkerResultHandler name '{}' already exists",
-                            &worker_result_handler.name
+                            worker_result_handler.name
                         ))
                         .into());
                     }

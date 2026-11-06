@@ -18,7 +18,7 @@ pub struct HandlerExecutor {
 }
 
 impl HandlerExecutor {
-    const MAX_RETRIES: u32 = 3;
+    const MAX_ATTEMPTS: u32 = 3;
     /// Create new HandlerExecutor
     pub fn new(
         local_config_store: SharedLocalConfigStore,
@@ -31,80 +31,54 @@ impl HandlerExecutor {
     }
 
     /// Execute workflow with retry strategy
-    /// - Max 3 retries with exponential backoff + jitter
-    /// - Retry intervals: 1s±0.5s, 2s±1s, 4s±2s
+    /// - Only connection failures before a job is created are retried (see
+    ///   [`shared::execution_failure::is_retriable_connection_failure`]); a created job's failure
+    ///   is retried by jobworkerp per its RetryPolicy, so re-submitting would duplicate it
+    /// - Max 3 attempts with exponential backoff + jitter: waits of 1s, then 2-3s
+    ///
+    /// The final error is returned unlogged; the caller reports it.
     pub async fn execute_workflow_with_retry(
         &self,
         handler: &SlackEventHandler,
         event_payload: serde_json::Value,
     ) -> Result<()> {
-        let mut last_error = None;
-
-        for attempt in 0..Self::MAX_RETRIES {
+        let name = handler.data.as_ref().map_or("unknown", |d| d.name.as_str());
+        let mut attempt = 0;
+        loop {
             match self.execute_workflow(handler, event_payload.clone()).await {
                 Ok(()) => {
                     if attempt > 0 {
                         tracing::info!(
                             "Handler execution succeeded after {} retries for handler '{}'",
                             attempt,
-                            handler
-                                .data
-                                .as_ref()
-                                .map(|d| d.name.as_str())
-                                .unwrap_or("unknown")
+                            name
                         );
                     }
                     return Ok(());
                 }
+                Err(e)
+                    if attempt + 1 >= Self::MAX_ATTEMPTS
+                        || !shared::execution_failure::is_retriable_connection_failure(&e) =>
+                {
+                    return Err(e);
+                }
                 Err(e) => {
-                    last_error = Some(e);
-
-                    // Check if error is retriable
-                    if !Self::is_retriable_error(last_error.as_ref().unwrap()) {
-                        tracing::error!(
-                            "Non-retriable error for handler '{}': {}",
-                            handler
-                                .data
-                                .as_ref()
-                                .map(|d| d.name.as_str())
-                                .unwrap_or("unknown"),
-                            last_error.as_ref().unwrap()
-                        );
-                        return Err(last_error.unwrap());
-                    }
-
-                    if attempt < Self::MAX_RETRIES - 1 {
-                        let base_delay = 2u64.pow(attempt);
-                        let jitter = (base_delay as f64 * 0.5) as u64;
-                        let delay = base_delay + (rand::random::<u64>() % (jitter + 1));
-
-                        tracing::warn!(
-                            "Handler execution failed (attempt {}/{}), retrying in {}s: {}",
-                            attempt + 1,
-                            Self::MAX_RETRIES,
-                            delay,
-                            last_error.as_ref().unwrap()
-                        );
-
-                        tokio::time::sleep(Duration::from_secs(delay)).await;
-                    }
+                    let base_delay = 2u64.pow(attempt);
+                    let jitter = (base_delay as f64 * 0.5) as u64;
+                    let delay = base_delay + (rand::random::<u64>() % (jitter + 1));
+                    tracing::warn!(
+                        "Handler execution failed (attempt {}/{}) for handler '{}', retrying in {}s: {:#}",
+                        attempt + 1,
+                        Self::MAX_ATTEMPTS,
+                        name,
+                        delay,
+                        e
+                    );
+                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                    attempt += 1;
                 }
             }
         }
-
-        // All retries exhausted
-        let final_error = last_error.unwrap();
-        tracing::error!(
-            "Handler execution failed after {} retries for handler '{}': {}",
-            Self::MAX_RETRIES,
-            handler
-                .data
-                .as_ref()
-                .map(|d| d.name.as_str())
-                .unwrap_or("unknown"),
-            final_error
-        );
-        Err(final_error)
     }
 
     /// Execute workflow (internal method, no retry)
@@ -176,6 +150,7 @@ impl HandlerExecutor {
                 endpoint: endpoint_owned.clone(),
                 target,
                 args: Some(workflow_args.clone()),
+                job_timeout_sec: None,
             })
             .await
         };
@@ -212,14 +187,9 @@ impl HandlerExecutor {
                 Ok(())
             }
             Ok(outcome) => {
-                // A terminal job failure (e.g. transient 5xx/timeout surfaced by the runner) must
-                // propagate so execute_workflow_with_retry can re-evaluate and retry; returning Ok
-                // here would mask the failure. The job output carries the failure reason, which
-                // is_retriable_error inspects to decide retriability.
-                tracing::warn!(
-                    "Execution failed for handler '{}' (job recorded for status tracking)",
-                    data.name
-                );
+                // Propagate the failure instead of masking it as Ok. It is not a connection
+                // failure, so execute_workflow_with_retry does not re-submit the job: jobworkerp
+                // already applied the worker's RetryPolicy before this terminal state.
                 Err(anyhow::anyhow!(
                     "Job for handler '{}' reached a failed terminal state: {}",
                     data.name,
@@ -259,58 +229,6 @@ impl HandlerExecutor {
         }
 
         serde_json::to_string(&merged).context("Failed to serialize merged arguments")
-    }
-
-    /// Check if error is retriable
-    /// Retriable errors:
-    /// - Connection errors (temporary)
-    /// - workflow_url fetch failures (HTTP 5xx, timeout)
-    /// - Network errors
-    ///
-    /// Non-retriable errors:
-    /// - Parse errors (permanent)
-    /// - Authentication errors (HTTP 401, 403)
-    /// - workflow_url fetch failures (HTTP 4xx except 404)
-    /// - Validation errors
-    fn is_retriable_error(error: &anyhow::Error) -> bool {
-        let error_msg = error.to_string().to_lowercase();
-
-        // Non-retriable: parse errors
-        if error_msg.contains("parse") || error_msg.contains("json") {
-            return false;
-        }
-
-        // Non-retriable: authentication errors
-        if error_msg.contains("401")
-            || error_msg.contains("403")
-            || error_msg.contains("unauthorized")
-        {
-            return false;
-        }
-
-        // Non-retriable: validation errors
-        if error_msg.contains("validation") || error_msg.contains("invalid") {
-            return false;
-        }
-
-        // Non-retriable: worker not found (will not resolve on retry)
-        if error_msg.contains("worker not found") {
-            return false;
-        }
-
-        // Retriable: connection errors, timeouts, 5xx errors
-        if error_msg.contains("connection")
-            || error_msg.contains("timeout")
-            || error_msg.contains("500")
-            || error_msg.contains("502")
-            || error_msg.contains("503")
-            || error_msg.contains("504")
-        {
-            return true;
-        }
-
-        // Default: consider retriable (conservative approach)
-        true
     }
 }
 
@@ -428,8 +346,6 @@ mod tests {
 
     fn config_store_with_unreachable_server() -> SharedLocalConfigStore {
         let mut store = LocalConfigStore::default();
-        // Reserved TEST-NET-1 address (RFC 5737) that is not routable: enqueue
-        // fails before any job_id is assigned.
         store
             .upsert_jobworkerp_server(JobworkerpServer {
                 id: Some(JobworkerpServerId { value: 1 }),
@@ -448,7 +364,6 @@ mod tests {
         Arc::new(RwLock::new(store))
     }
 
-    #[allow(dead_code)]
     fn create_test_handler(id: i64, workflow_url: &str, args: Option<String>) -> SlackEventHandler {
         SlackEventHandler {
             id: Some(SlackEventHandlerId { value: id }),
@@ -458,23 +373,6 @@ mod tests {
                 jobworkerp_server_id: Some(JobworkerpServerId { value: 1 }),
                 channel: String::new(),
                 args,
-                ..Default::default()
-            }),
-        }
-    }
-
-    #[allow(dead_code)]
-    fn create_test_server() -> JobworkerpServer {
-        use proto::jobworkerp_conductor::data::{JobworkerpServerData, JobworkerpServerId};
-
-        JobworkerpServer {
-            id: Some(JobworkerpServerId { value: 1 }),
-            data: Some(JobworkerpServerData {
-                name: "test_server".to_string(),
-                host: "localhost".to_string(),
-                port: "9000".to_string(),
-                ssl_enabled: false,
-                enabled: true,
                 ..Default::default()
             }),
         }
@@ -538,34 +436,6 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("parse"));
     }
 
-    #[test]
-    fn test_is_retriable_error() {
-        // Retriable errors
-        assert!(HandlerExecutor::is_retriable_error(&anyhow::anyhow!(
-            "Connection refused"
-        )));
-        assert!(HandlerExecutor::is_retriable_error(&anyhow::anyhow!(
-            "Request timeout"
-        )));
-        assert!(HandlerExecutor::is_retriable_error(&anyhow::anyhow!(
-            "HTTP 503 Service Unavailable"
-        )));
-
-        // Non-retriable errors
-        assert!(!HandlerExecutor::is_retriable_error(&anyhow::anyhow!(
-            "JSON parse error"
-        )));
-        assert!(!HandlerExecutor::is_retriable_error(&anyhow::anyhow!(
-            "HTTP 401 Unauthorized"
-        )));
-        assert!(!HandlerExecutor::is_retriable_error(&anyhow::anyhow!(
-            "Validation failed"
-        )));
-        assert!(!HandlerExecutor::is_retriable_error(&anyhow::anyhow!(
-            "Worker not found: worker_name='my-worker'"
-        )));
-    }
-
     // An enqueue failure (no job_id assigned, e.g. unreachable jobworkerp) must be recorded
     // with enqueue_error and propagated as Err so retry/EnqueueFailed handling can kick in.
     #[tokio::test]
@@ -601,10 +471,10 @@ mod tests {
         assert_eq!(errors[0].0, 1, "update targets the created ref id");
     }
 
-    // execute_workflow_with_retry must keep retrying enqueue failures (which surface as
-    // connection errors -> retriable) up to MAX_RETRIES, then return the final Err.
+    // A connection failure means no job was created, so it is retried up to MAX_ATTEMPTS and the
+    // final Err is returned.
     #[tokio::test]
-    async fn execute_workflow_with_retry_propagates_enqueue_failure() {
+    async fn execute_workflow_with_retry_retries_connection_failure() {
         let recorder = Arc::new(CapturingRecorder::default());
         let executor =
             HandlerExecutor::new(config_store_with_unreachable_server(), recorder.clone());
@@ -619,9 +489,35 @@ mod tests {
             "exhausted retries on enqueue failure must surface as Err"
         );
         // Each attempt records a failed execution_ref.
+        assert_eq!(
+            recorder.recorded.lock().unwrap().len(),
+            HandlerExecutor::MAX_ATTEMPTS as usize,
+            "every attempt must be made and recorded"
+        );
+    }
+
+    // Anything but a connection failure (here: no execution target configured) is not retried:
+    // re-submitting cannot fix it, and job failures are retried by jobworkerp itself.
+    #[tokio::test]
+    async fn execute_workflow_with_retry_does_not_retry_non_connection_failure() {
+        let recorder = Arc::new(CapturingRecorder::default());
+        let executor =
+            HandlerExecutor::new(config_store_with_unreachable_server(), recorder.clone());
+
+        let handler = create_test_handler(8, "", None);
+        let result = executor
+            .execute_workflow_with_retry(&handler, json!({"text": "hi"}))
+            .await;
+
+        let err = result.expect_err("missing execution target must fail");
         assert!(
-            !recorder.recorded.lock().unwrap().is_empty(),
-            "failed attempts must be recorded"
+            format!("{err:#}").contains("No execution target"),
+            "{err:#}"
+        );
+        assert_eq!(
+            recorder.recorded.lock().unwrap().len(),
+            1,
+            "a non-connection failure must be attempted only once"
         );
     }
 }

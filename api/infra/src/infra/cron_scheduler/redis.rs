@@ -172,6 +172,7 @@ async fn redis_test() -> Result<()> {
         created_at: 0,
         updated_at: 0,
         args: Some(r#"{"redis": "test"}"#.to_string()),
+        job_timeout_sec: Some(0),
         execution_target: None,
     };
     // clear first
@@ -202,6 +203,16 @@ async fn redis_test() -> Result<()> {
     assert!(!repo.upsert(&id, &cron_scheduler2).await?);
     let res2 = repo.find(&id).await?;
     assert_eq!(res2.and_then(|r| r.data).as_ref(), Some(&cron_scheduler2));
+
+    cron_scheduler2.job_timeout_sec = None;
+    assert!(!repo.upsert(&id, &cron_scheduler2).await?);
+    let cleared = repo.find(&id).await?;
+    assert_eq!(
+        None,
+        cleared
+            .and_then(|scheduler| scheduler.data)
+            .and_then(|data| data.job_timeout_sec)
+    );
 
     // delete and not found
     assert!(repo.delete(&id).await?);

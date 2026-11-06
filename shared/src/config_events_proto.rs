@@ -497,6 +497,7 @@ impl ConfigChangeEventWrapper {
                 workflow_url: "https://example.com/workflow.yml".to_string(),
                 channel: Some("test_channel".to_string()),
             })),
+            job_timeout_sec: None,
         }
     }
 

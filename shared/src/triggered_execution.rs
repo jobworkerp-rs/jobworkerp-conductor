@@ -63,6 +63,7 @@ pub struct ExecutionPlan {
     pub endpoint: String,
     pub target: ResolvedTarget,
     pub args: Option<String>,
+    pub job_timeout_sec: Option<u32>,
 }
 
 /// Dispatch the resolved target to the matching streaming-first enqueue. Returns the immediate
@@ -76,6 +77,7 @@ pub async fn enqueue_by_target(plan: &ExecutionPlan) -> Result<EnqueuedJob> {
                 &plan.endpoint,
                 plan.args.as_deref(),
                 using.as_deref(),
+                plan.job_timeout_sec,
             )
             .await
         }
@@ -88,6 +90,7 @@ pub async fn enqueue_by_target(plan: &ExecutionPlan) -> Result<EnqueuedJob> {
                 &plan.endpoint,
                 plan.args.as_deref(),
                 channel.as_deref(),
+                plan.job_timeout_sec,
             )
             .await
         }
@@ -118,7 +121,7 @@ pub async fn spawn_and_record(
         Err(e) => {
             // Enqueue setup failed before a job_id existed: record it on the already-created ref so
             // the status API reports ENQUEUE_FAILED, then propagate.
-            if let Err(rec_err) = recorder.update_enqueue_error(&id, &e.to_string()).await {
+            if let Err(rec_err) = recorder.update_enqueue_error(&id, &format!("{e:#}")).await {
                 tracing::warn!("manual trigger: failed to record enqueue_error: {rec_err}");
             }
             return Err(e);
@@ -146,7 +149,7 @@ pub async fn spawn_and_record(
                 }
             }
             Err(e) => {
-                if let Err(rec_err) = recorder.update_enqueue_error(&id, &e.to_string()).await {
+                if let Err(rec_err) = recorder.update_enqueue_error(&id, &format!("{e:#}")).await {
                     tracing::warn!("manual trigger: failed to record terminal error: {rec_err}");
                 }
             }

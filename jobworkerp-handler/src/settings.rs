@@ -49,8 +49,8 @@ impl JobResultListenerSetting {
             .get(&workflow_setting_item.jobworkerp)
             .ok_or(anyhow::anyhow!(
                 "jobworkerp not found:{} from {:#?}",
-                &workflow_setting_item.jobworkerp,
-                &workflow_setting_item,
+                workflow_setting_item.jobworkerp,
+                workflow_setting_item,
             ))?
             .clone();
         let listen_jobworkerp_name = workflow_setting_item
@@ -60,7 +60,7 @@ impl JobResultListenerSetting {
             .get(&listen_jobworkerp_name)
             .ok_or(anyhow::anyhow!(
                 "listen_jobworkerp not found:{}",
-                &listen_jobworkerp_name,
+                listen_jobworkerp_name,
             ))?
             .clone();
         let listen_worker_name = workflow_setting_item
@@ -117,6 +117,8 @@ pub struct WorkflowSettingItem {
     pub worker_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub using: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_timeout_sec: Option<u32>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -157,7 +159,7 @@ impl SchedulerSetting {
             .get(&item.jobworkerp)
             .ok_or(anyhow::anyhow!(
                 "jobworkerp not found:{} from {:#?}",
-                &item.jobworkerp,
+                item.jobworkerp,
                 item.jobworkerp,
             ))?
             .clone();

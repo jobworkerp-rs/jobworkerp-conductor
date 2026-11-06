@@ -3,6 +3,12 @@ use proto::jobworkerp_conductor::data::{
     WorkerExecution, WorkflowExecution,
 };
 
+pub(crate) fn job_timeout_sec_from_db(
+    value: Option<i64>,
+) -> Result<Option<u32>, std::num::TryFromIntError> {
+    value.map(u32::try_from).transpose()
+}
+
 // db row definitions
 #[derive(sqlx::FromRow)]
 pub struct CronSchedulerRow {
@@ -19,10 +25,14 @@ pub struct CronSchedulerRow {
     pub args: Option<String>,
     pub worker_name: Option<String>,
     pub using: Option<String>,
+    pub job_timeout_sec: Option<i64>,
 }
 
 impl CronSchedulerRow {
-    pub fn to_proto(&self) -> CronScheduler {
+    pub fn to_proto(&self) -> anyhow::Result<CronScheduler> {
+        let job_timeout_sec = job_timeout_sec_from_db(self.job_timeout_sec).map_err(|_| {
+            anyhow::anyhow!("invalid cron job_timeout_sec: {:?}", self.job_timeout_sec)
+        })?;
         // Build oneof execution_target from DB columns
         let execution_target = if self.worker_name.as_ref().is_some_and(|n| !n.is_empty()) {
             Some(ExecutionTarget::Worker(WorkerExecution {
@@ -38,7 +48,7 @@ impl CronSchedulerRow {
             None
         };
 
-        CronScheduler {
+        Ok(CronScheduler {
             id: Some(CronSchedulerId { value: self.id }),
             data: Some(CronSchedulerData {
                 name: self.name.clone(),
@@ -55,8 +65,39 @@ impl CronSchedulerRow {
                 created_at: self.created_at,
                 updated_at: self.updated_at,
                 args: self.args.clone(),
+                job_timeout_sec,
                 execution_target,
             }),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CronSchedulerRow;
+
+    fn row(job_timeout_sec: Option<i64>) -> CronSchedulerRow {
+        CronSchedulerRow {
+            id: 1,
+            name: "test".to_string(),
+            jobworkerp_server_id: 1,
+            workflow_url: String::new(),
+            channel: None,
+            crontab: String::new(),
+            enabled: true,
+            description: None,
+            created_at: 0,
+            updated_at: 0,
+            args: None,
+            worker_name: None,
+            using: None,
+            job_timeout_sec,
         }
+    }
+
+    #[test]
+    fn rejects_invalid_persisted_timeout_values() {
+        assert!(row(Some(-1)).to_proto().is_err());
+        assert!(row(Some(i64::from(u32::MAX) + 1)).to_proto().is_err());
     }
 }

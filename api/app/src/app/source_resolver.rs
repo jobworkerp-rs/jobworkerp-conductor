@@ -31,6 +31,7 @@ pub struct ResolvedSource {
     pub configured_args: Option<String>,
     pub source_name: String,
     pub jobworkerp_server_id: JobworkerpServerId,
+    pub job_timeout_sec: Option<u32>,
 }
 
 #[async_trait]
@@ -135,6 +136,7 @@ impl ExecutionSourceResolver for CronSourceResolver {
             configured_args: data.args,
             source_name: data.name,
             jobworkerp_server_id: server_id,
+            job_timeout_sec: data.job_timeout_sec,
         })
     }
 }

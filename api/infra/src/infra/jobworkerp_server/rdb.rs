@@ -60,7 +60,7 @@ pub trait JobworkerpServerRepository: UseRdbPool + UseIdGenerator + Sync + Send 
                     {
                         return Err(UiEventHandlerError::AlreadyExists(format!(
                             "Server name '{}' already exists",
-                            &jobworkerp_server.name
+                            jobworkerp_server.name
                         ))
                         .into());
                     }

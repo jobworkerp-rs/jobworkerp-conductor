@@ -7,6 +7,7 @@ use sqlx::Row;
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
+use crate::infra::cron_scheduler::rows::job_timeout_sec_from_db;
 use crate::infra::{IdGeneratorWrapper, UseIdGenerator};
 
 #[async_trait]
@@ -164,8 +165,8 @@ pub trait ConfigManagementRepository: UseRdbPool + UseIdGenerator + Sync + Send 
 
                 let result = sqlx::query(
                     "INSERT INTO `cron_scheduler` (
-                    `id`, `name`, `jobworkerp_server_id`, `workflow_url`, `channel`, `crontab`, `enabled`, `description`, `created_at`, `updated_at`, `args`, `worker_name`, `using`
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                    `id`, `name`, `jobworkerp_server_id`, `workflow_url`, `channel`, `crontab`, `enabled`, `description`, `created_at`, `updated_at`, `args`, `worker_name`, `using`, `job_timeout_sec`
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                 )
                 .bind(id)
                 .bind(&scheduler.name)
@@ -180,6 +181,7 @@ pub trait ConfigManagementRepository: UseRdbPool + UseIdGenerator + Sync + Send 
                 .bind(&scheduler.args)
                 .bind(&scheduler.worker_name)
                 .bind(scheduler.using.as_deref().filter(|s| !s.is_empty()))
+                .bind(scheduler.job_timeout_sec.map(i64::from))
                 .execute(&mut *tx)
                 .await;
 
@@ -344,12 +346,12 @@ pub trait ConfigManagementRepository: UseRdbPool + UseIdGenerator + Sync + Send 
 
         // Get schedulers
         let scheduler_query = if enabled_only {
-            "SELECT cs.name, cs.workflow_url, cs.channel, cs.crontab, cs.args, cs.`worker_name`, cs.`using`, js.name as jobworkerp_name
+            "SELECT cs.name, cs.workflow_url, cs.channel, cs.crontab, cs.args, cs.`worker_name`, cs.`using`, cs.`job_timeout_sec`, js.name as jobworkerp_name
              FROM cron_scheduler cs
              JOIN jobworkerp_server js ON cs.jobworkerp_server_id = js.id
              WHERE cs.enabled = 1"
         } else {
-            "SELECT cs.name, cs.workflow_url, cs.channel, cs.crontab, cs.args, cs.`worker_name`, cs.`using`, js.name as jobworkerp_name
+            "SELECT cs.name, cs.workflow_url, cs.channel, cs.crontab, cs.args, cs.`worker_name`, cs.`using`, cs.`job_timeout_sec`, js.name as jobworkerp_name
              FROM cron_scheduler cs
              JOIN jobworkerp_server js ON cs.jobworkerp_server_id = js.id"
         };
@@ -369,6 +371,9 @@ pub trait ConfigManagementRepository: UseRdbPool + UseIdGenerator + Sync + Send 
             let args: Option<String> = row.get("args");
             let worker_name: Option<String> = row.get("worker_name");
             let using: Option<String> = row.get("using");
+            let job_timeout_sec =
+                job_timeout_sec_from_db(row.try_get::<Option<i64>, _>("job_timeout_sec")?)
+                    .context("Invalid scheduler job_timeout_sec in database")?;
 
             schedulers.push(WorkflowSettingItem {
                 name,
@@ -381,6 +386,7 @@ pub trait ConfigManagementRepository: UseRdbPool + UseIdGenerator + Sync + Send 
                 args,
                 worker_name,
                 using,
+                job_timeout_sec,
             });
         }
 
@@ -430,6 +436,7 @@ pub trait ConfigManagementRepository: UseRdbPool + UseIdGenerator + Sync + Send 
                 args,
                 worker_name,
                 using,
+                job_timeout_sec: None,
             });
         }
 
@@ -638,6 +645,55 @@ using = "run"
     }
 
     #[test]
+    fn test_job_timeout_toml_accepts_old_omitted_and_unsigned_range() {
+        let old_toml = r#"
+[[jobworkerp]]
+name = "server1"
+address = "http://localhost:8080"
+
+[[schedulers]]
+name = "job"
+jobworkerp = "server1"
+workflow_url = "job.yml"
+crontab = "0 * * * *"
+"#;
+        assert_eq!(
+            validate_toml_config(old_toml).unwrap().schedulers.unwrap()[0].job_timeout_sec,
+            None
+        );
+
+        for (value, expected) in [("0", 0), ("4294967295", u32::MAX)] {
+            let toml = format!("{old_toml}\njob_timeout_sec = {value}\n");
+            // [[schedulers]] is the last table, so the appended key belongs to it.
+            let item = validate_toml_config(&toml)
+                .unwrap()
+                .schedulers
+                .unwrap()
+                .remove(0);
+            assert_eq!(item.job_timeout_sec, Some(expected));
+        }
+    }
+
+    #[test]
+    fn test_job_timeout_toml_rejects_negative_and_out_of_range_values() {
+        let base = r#"
+[[jobworkerp]]
+name = "server1"
+address = "http://localhost:8080"
+
+[[schedulers]]
+name = "job"
+jobworkerp = "server1"
+workflow_url = "job.yml"
+crontab = "0 * * * *"
+"#;
+        for value in ["-1", "4294967296"] {
+            let toml = format!("{base}job_timeout_sec = {value}\n");
+            assert!(validate_toml_config(&toml).is_err());
+        }
+    }
+
+    #[test]
     fn test_validate_listener_without_worker_name_ok() {
         let valid_toml = r#"
 [[jobworkerp]]
@@ -765,6 +821,27 @@ name = "daily_job"
 jobworkerp = "test_server"
 workflow_url = "daily.yml"
 crontab = "0 0 * * *"
+job_timeout_sec = 0
+
+[[schedulers]]
+name = "hourly_job"
+jobworkerp = "test_server"
+workflow_url = "hourly.yml"
+crontab = "0 * * * *"
+job_timeout_sec = 3600
+
+[[schedulers]]
+name = "large_timeout_job"
+jobworkerp = "test_server"
+workflow_url = "large.yml"
+crontab = "0 1 * * *"
+job_timeout_sec = 4294967295
+
+[[schedulers]]
+name = "default_timeout_job"
+jobworkerp = "test_server"
+workflow_url = "default.yml"
+crontab = "0 2 * * *"
 
 [[listeners]]
 name = "result_listener"
@@ -784,10 +861,45 @@ workflow_url = "listener.yml"
             // Export and verify
             let exported_toml = repository.export_toml_config(false).await?;
             println!("Exported TOML:\n{exported_toml}");
+            let exported: WorkflowSettingFile = toml::from_str(&exported_toml)?;
+            let exported_timeouts = exported
+                .schedulers
+                .expect("exported schedulers")
+                .into_iter()
+                .map(|scheduler| (scheduler.name, scheduler.job_timeout_sec))
+                .collect::<std::collections::HashMap<_, _>>();
+            assert_eq!(exported_timeouts.get("daily_job"), Some(&Some(0)));
+            assert_eq!(exported_timeouts.get("hourly_job"), Some(&Some(3600)));
+            assert_eq!(
+                exported_timeouts.get("large_timeout_job"),
+                Some(&Some(u32::MAX))
+            );
+            assert_eq!(exported_timeouts.get("default_timeout_job"), Some(&None));
+
+            // Both enabled-only and all-scheduler export paths must retain timeout values.
+            let enabled_toml = repository.export_toml_config(true).await?;
+            let enabled_export: WorkflowSettingFile = toml::from_str(&enabled_toml)?;
+            let enabled_timeouts = enabled_export
+                .schedulers
+                .expect("enabled schedulers")
+                .into_iter()
+                .map(|scheduler| (scheduler.name, scheduler.job_timeout_sec))
+                .collect::<std::collections::HashMap<_, _>>();
+            assert_eq!(enabled_timeouts, exported_timeouts);
 
             // Clear and re-import exported data
             repository.clear_all_configs().await?;
             let reimport_result = repository.import_toml_config(&exported_toml, true).await?;
+
+            let reexported_toml = repository.export_toml_config(false).await?;
+            let reexported: WorkflowSettingFile = toml::from_str(&reexported_toml)?;
+            let reexported_timeouts = reexported
+                .schedulers
+                .expect("re-exported schedulers")
+                .into_iter()
+                .map(|scheduler| (scheduler.name, scheduler.job_timeout_sec))
+                .collect::<std::collections::HashMap<_, _>>();
+            assert_eq!(reexported_timeouts, exported_timeouts);
 
             // Verify counts match
             assert_eq!(import_result.0, reimport_result.0, "Server count mismatch");
@@ -799,6 +911,18 @@ workflow_url = "listener.yml"
                 import_result.2, reimport_result.2,
                 "Listener count mismatch"
             );
+
+            for invalid_timeout in [-1_i64, i64::from(u32::MAX) + 1] {
+                sqlx::query(
+                    "UPDATE cron_scheduler SET job_timeout_sec = ? WHERE name = 'daily_job'",
+                )
+                .bind(invalid_timeout)
+                .execute(pool)
+                .await?;
+                assert!(repository.export_toml_config(false).await.is_err());
+            }
+            // Remove the invalid rows so later tests sharing this pool can read cron schedulers.
+            repository.clear_all_configs().await?;
 
             println!("✅ Export/Import roundtrip successful");
             Ok(())
@@ -857,36 +981,35 @@ workflow_url = "listener.yml"
             Ok(())
         }
 
+        async fn setup_clean_test_pool() -> Result<&'static RdbPool> {
+            let pool = if cfg!(feature = "mysql") {
+                let pool = setup_test_rdb_from("sql/mysql").await;
+                for query in [
+                    "TRUNCATE TABLE worker_result_handler;",
+                    "TRUNCATE TABLE cron_scheduler;",
+                    "TRUNCATE TABLE jobworkerp_server;",
+                ] {
+                    sqlx::query(query).execute(pool).await?;
+                }
+                pool
+            } else {
+                let pool = setup_test_rdb_from("sql/sqlite").await;
+                for query in [
+                    "DELETE FROM worker_result_handler;",
+                    "DELETE FROM cron_scheduler;",
+                    "DELETE FROM jobworkerp_server;",
+                ] {
+                    sqlx::query(query).execute(pool).await?;
+                }
+                pool
+            };
+            Ok(pool)
+        }
+
         #[test]
         fn run_integration_tests() -> Result<()> {
             TEST_RUNTIME.block_on(async {
-                let rdb_pool = if cfg!(feature = "mysql") {
-                    let pool = setup_test_rdb_from("sql/mysql").await;
-                    // Clear all tables
-                    sqlx::query("TRUNCATE TABLE worker_result_handler;")
-                        .execute(pool)
-                        .await?;
-                    sqlx::query("TRUNCATE TABLE cron_scheduler;")
-                        .execute(pool)
-                        .await?;
-                    sqlx::query("TRUNCATE TABLE jobworkerp_server;")
-                        .execute(pool)
-                        .await?;
-                    pool
-                } else {
-                    let pool = setup_test_rdb_from("sql/sqlite").await;
-                    // Clear all tables
-                    sqlx::query("DELETE FROM worker_result_handler;")
-                        .execute(pool)
-                        .await?;
-                    sqlx::query("DELETE FROM cron_scheduler;")
-                        .execute(pool)
-                        .await?;
-                    sqlx::query("DELETE FROM jobworkerp_server;")
-                        .execute(pool)
-                        .await?;
-                    pool
-                };
+                let rdb_pool = setup_clean_test_pool().await?;
 
                 println!("=== Running Config Management Integration Tests ===");
                 _test_import_toml_with_duplicates(rdb_pool).await?;
@@ -894,6 +1017,15 @@ workflow_url = "listener.yml"
                 _test_constraint_violation_recovery(rdb_pool).await?;
 
                 Ok(())
+            })
+        }
+
+        #[test]
+        fn run_timeout_toml_roundtrip() -> Result<()> {
+            TEST_RUNTIME.block_on(async {
+                let pool = setup_clean_test_pool().await?;
+
+                _test_export_import_roundtrip(pool).await
             })
         }
     }

@@ -216,15 +216,15 @@ impl JobworkerpResultListener {
                             if outcome.success {
                                 tracing::debug!("Result id: {:#?}", &rid.value);
                             } else {
-                                tracing::warn!(
-                                    "WorkerResultHandler workflow failed (job recorded): result id {}",
-                                    &rid.value
-                                );
+                                outcome.log_failure(&format!(
+                                    "worker result handler '{}' (result id {})",
+                                    listen_workflow_settings.name, rid.value
+                                ));
                             }
                         }
                         Err(e) => {
                             tracing::error!(
-                                "handle_job_result error: {:?}, result id: {}",
+                                "handle_job_result error: {:#}, result id: {}",
                                 e,
                                 &rid.value
                             );

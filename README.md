@@ -230,7 +230,14 @@ Socket Mode listener.
 ## Database Notes
 
 SQLite is the default development and single-process deployment choice. The
-SQLite schema is embedded and applied at startup.
+SQLite schema is embedded as the migrations in `api/infra/sql/sqlite/`, and
+pending ones are applied automatically at startup. An existing database that
+needs changes is first copied to `<database file>.pre-migration.bak` (one
+generation is kept).
+
+Schema updates for an existing MySQL database are not applied at startup.
+Back up the database and follow the
+[DB migration procedure](api/infra/sql/migration/README.md).
 
 For MySQL, initialize the schema before starting the conductor:
 

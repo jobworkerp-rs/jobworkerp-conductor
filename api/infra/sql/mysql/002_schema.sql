@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS `cron_scheduler` (
     `args` TEXT DEFAULT NULL,
     `worker_name` VARCHAR(255) DEFAULT NULL,
     `using` VARCHAR(255) DEFAULT NULL,
+    `job_timeout_sec` BIGINT DEFAULT NULL,
     `created_at` BIGINT NOT NULL,
     `updated_at` BIGINT NOT NULL,
     -- Index definitions
