@@ -1,6 +1,8 @@
 [package]
 name = "slack-event-handler"
 version = "0.1.0"
+license.workspace = true
+publish = false
 edition = "2021"
 
 [dependencies]

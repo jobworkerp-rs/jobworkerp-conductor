@@ -1,6 +1,8 @@
 [package]
 name = "infra"
 version = "0.0.1"
+license.workspace = true
+publish = false
 authors = ["sutr"]
 edition = "2021"
 

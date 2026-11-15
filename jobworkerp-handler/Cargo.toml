@@ -1,6 +1,8 @@
 [package]
 name = "jobworkerp-handler"
 version = "0.0.1"
+license.workspace = true
+publish = false
 edition = "2021"
 
 

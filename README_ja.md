@@ -3,7 +3,7 @@
 Jobworkerp Conductor は、運用イベントと
 [jobworkerp](https://github.com/jobworkerp-rs/jobworkerp-rs) の実行をつなぐイベントオーケストレーションサービスです。cron スケジュール、Slack イベント、jobworkerp worker の完了結果をきっかけに、workflow file または登録済み worker を実行します。
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](Cargo.toml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 English: [README.md](README.md)
 
@@ -28,10 +28,41 @@ api/grpc-admin/         gRPC admin server
 proto/                  Protocol Buffers 定義
 shared/                 実行、バリデーション、通知の共通処理
 modules/                再利用ライブラリ crate
-docker/                 コンテナ関連ファイル
 ```
 
+## インストール
+
+ビルド済みバイナリを各 [GitHub Release](https://github.com/jobworkerp-rs/jobworkerp-conductor/releases) に添付しています。
+
+| Asset | 動作要件 |
+|---|---|
+| `conductor-main-x86_64-unknown-linux-musl.tar.gz` | x86_64 の Linux。静的リンクのため libc に依存しません。 |
+| `conductor-main-aarch64-unknown-linux-musl.tar.gz` | aarch64 の Linux。静的リンクのため libc に依存しません。 |
+| `conductor-main-aarch64-apple-darwin.tar.gz` | Apple Silicon の macOS 11 以降。 |
+
+各アーカイブには `conductor-main` バイナリ、`LICENSE`、`THIRD-PARTY-LICENSES.txt`、README、設定例の `dot.env` が入っています。同じリリースの `SHA256SUMS` で検証し、必要に応じて GitHub CLI でビルドの provenance を検証してください。
+
+```text
+sha256sum --ignore-missing -c SHA256SUMS
+gh attestation verify conductor-main-<target>.tar.gz --repo jobworkerp-rs/jobworkerp-conductor
+tar -xzf conductor-main-<target>.tar.gz
+conductor-main-<target>/conductor-main --version
+```
+
+macOS では、取得した asset を `shasum` で検証します。
+
+```text
+grep ' conductor-main-aarch64-apple-darwin.tar.gz$' SHA256SUMS | shasum -a 256 -c
+```
+
+macOS のバイナリは ad-hoc 署名のみで公証していません。ブラウザで取得して Gatekeeper に実行を拒否された場合は、`curl` で取得するか、`xattr -d com.apple.quarantine` で quarantine 属性を外してください。
+
+`dot.env` を実行ディレクトリに `.env` としてコピーし、内容を調整してください（[設定](#設定) を参照）。コンテナイメージも公開しています（[Docker](#docker) を参照）。
+
 ## 前提条件
+
+ソースからビルドする場合に必要です。
+
 
 - Rust stable toolchain
 - `protoc`
@@ -87,6 +118,9 @@ cargo run --bin conductor-main -- register-workers \
 
 cargo run --bin conductor-main -- unregister-workers \
   --jobworkerp-url http://localhost:9000
+
+# バージョンを表示。
+cargo run --bin conductor-main -- --version
 ```
 
 `register-workers` は `conductor-admin` FunctionSet と static worker を作成します。これらの worker は jobworkerp の GRPC runner 経由で conductor の gRPC admin API を呼び出します。
@@ -247,8 +281,28 @@ cargo test -p slack-event-handler -- --test-threads=1
 
 ## Docker
 
-`conductor-main/Dockerfile` は、事前に build した `target/x86_64-unknown-linux-musl/release/conductor-main` を package します。`docker build` の前に musl binary を build してください。
+各リリースでは、リリースバイナリから作ったマルチプラットフォームイメージ（`linux/amd64`、`linux/arm64`）も公開しています。
+
+```bash
+docker pull ghcr.io/jobworkerp-rs/jobworkerp-conductor:latest
+gh attestation verify oci://ghcr.io/jobworkerp-rs/jobworkerp-conductor:latest \
+  --repo jobworkerp-rs/jobworkerp-conductor
+```
+
+イメージは `/home/conductor` でユーザー `conductor` として `conductor-main` を実行します。設定は環境変数で渡すか、`.env` をそこへマウントしてください。
+
+ローカルでイメージを作る場合、`conductor-main/Dockerfile` はリリースアーカイブの中身を `dist/linux-<arch>/`（`<arch>` は `amd64` または `arm64`）に置く前提です。
+
+```bash
+mkdir -p dist/linux-amd64
+tar -xzf conductor-main-x86_64-unknown-linux-musl.tar.gz -C dist/linux-amd64 --strip-components=1
+docker buildx build --platform linux/amd64 -f conductor-main/Dockerfile -t jobworkerp-conductor .
+```
+
+ソースからビルドしたバイナリを使う場合は、`target/x86_64-unknown-linux-musl/release/conductor-main`、`LICENSE`、`scripts/generate-third-party-licenses.sh` で生成した `THIRD-PARTY-LICENSES.txt` を `dist/linux-amd64/` に置いてください。
 
 ## ライセンス
 
-Apache-2.0。詳細は [Cargo.toml](Cargo.toml) を参照してください。
+Apache-2.0。詳細は [LICENSE](LICENSE) を参照してください。
+
+リリースバイナリとイメージはサードパーティの crate を静的リンクしています。それらのライセンスは `THIRD-PARTY-LICENSES.txt` に一覧があり、各アーカイブと、イメージ内の `/usr/share/doc/jobworkerp-conductor/` に同梱しています。
