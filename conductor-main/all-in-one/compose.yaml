@@ -1,0 +1,37 @@
+# Example: conductor and jobworkerp in one container (README "All-in-one
+# image"). Both ports are published on the host's loopback only by default;
+# the conductor admin API has no authentication and can run workflows on
+# jobworkerp, so widen CONDUCTOR_PUBLISH_HOST only behind access control.
+#
+#   docker compose -f conductor-main/all-in-one/compose.yaml up -d
+#
+# Variables read from the shell or a .env file next to this file:
+#   CONDUCTOR_PUBLISH_HOST   host address for the admin API      (127.0.0.1)
+#   JOBWORKERP_PUBLISH_HOST  host address for jobworkerp gRPC    (127.0.0.1)
+#   JOBWORKERP_BIND_HOST     jobworkerp's address in the container (127.0.0.1:
+#                            unreachable from outside even when published;
+#                            set 0.0.0.0 to use JOBWORKERP_PUBLISH_HOST)
+#   SLACK_APP_TOKEN, OPENAI_API_KEY, ...  passed through only when set
+services:
+  conductor:
+    image: ghcr.io/jobworkerp-rs/jobworkerp-conductor-all-in-one:latest
+    ports:
+      - "${CONDUCTOR_PUBLISH_HOST:-127.0.0.1}:9090:9090"
+      - "${JOBWORKERP_PUBLISH_HOST:-127.0.0.1}:9000:9000"
+    environment:
+      JW_GRPC_ADDR: "${JOBWORKERP_BIND_HOST:-127.0.0.1}:9000"
+      # Unprefixed variables reach conductor; JW_<NAME> reaches jobworkerp as
+      # <NAME>. A name without a value is passed only when it is set.
+      SLACK_APP_TOKEN:
+      JW_OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - conductor-data:/home/conductor
+    # The entrypoint stops conductor, then jobworkerp, waiting up to 20 s for
+    # each; Docker's default of 10 s would cut that short.
+    stop_grace_period: 60s
+    restart: unless-stopped
+    # tini is bundled; a second init would make it run as a child.
+    init: false
+
+volumes:
+  conductor-data:

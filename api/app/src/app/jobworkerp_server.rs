@@ -214,15 +214,29 @@ impl JobworkerpServerApp for JobworkerpServerAppImpl {
         jobworkerp_server: &Option<JobworkerpServerData>,
     ) -> Result<bool> {
         if let Some(w) = jobworkerp_server {
+            // An update may rename the server, so lookups cached under the
+            // previous name go stale as well.
+            let previous_name = match self.jobworkerp_server_repository().find(id).await {
+                Ok(server) => server.and_then(|server| server.data).map(|data| data.name),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to read jobworkerp_server {} before updating; a lookup cached \
+                         under its previous name may stay stale until it expires: {:?}",
+                        id.value,
+                        e
+                    );
+                    None
+                }
+            };
             let pool = self.jobworkerp_server_repository().db_pool();
             let mut tx = pool.begin().await.map_err(UiEventHandlerError::DBError)?;
             self.jobworkerp_server_repository()
                 .update(&mut *tx, id, w)
                 .await?;
             tx.commit().await.map_err(UiEventHandlerError::DBError)?;
-            // clear memory cache
-            let k = Arc::new(Self::find_cache_key(&id.value));
-            let _ = self.delete_cache(&k).await;
+            let mut names = vec![w.name.as_str()];
+            names.extend(previous_name.as_deref());
+            self.clear_cached(id, &names).await;
 
             // 🚀 Phase 4: 更新イベント通知
             let event =
@@ -237,9 +251,7 @@ impl JobworkerpServerApp for JobworkerpServerAppImpl {
 
             Ok(true)
         } else {
-            // clear memory cache
-            let k = Arc::new(Self::find_cache_key(&id.value));
-            let _ = self.delete_cache(&k).await;
+            self.clear_cached(id, &[]).await;
 
             // all empty, no update
             Ok(false)
@@ -255,8 +267,13 @@ impl JobworkerpServerApp for JobworkerpServerAppImpl {
 
         match r {
             Ok(true) => {
-                let k = Arc::new(Self::find_cache_key(&id.value));
-                let _ = self.delete_cache(&k).await;
+                let name = existing
+                    .as_ref()
+                    .ok()
+                    .and_then(Option::as_ref)
+                    .and_then(|server| server.data.as_ref())
+                    .map(|data| data.name.as_str());
+                self.clear_cached(id, name.as_slice()).await;
 
                 // 🚀 Phase 4: 削除イベント通知
                 if let Ok(Some(existing_data)) = existing {
@@ -273,6 +290,20 @@ impl JobworkerpServerApp for JobworkerpServerAppImpl {
                 Ok(true)
             }
             other => other,
+        }
+    }
+}
+
+impl JobworkerpServerAppImpl {
+    /// Drops the cached lookups of a server by id and by each of `names`.
+    async fn clear_cached(&self, id: &JobworkerpServerId, names: &[&str]) {
+        let _ = self
+            .delete_cache(&Arc::new(Self::find_cache_key(&id.value)))
+            .await;
+        for name in names {
+            let _ = self
+                .delete_cache(&Arc::new(Self::find_by_name_cache_key(name)))
+                .await;
         }
     }
 }

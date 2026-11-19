@@ -42,15 +42,10 @@ impl SlackEventHandlerRow {
     /// Convert DB string to ReactionOperation enum
     fn reaction_operation_from_db(value: Option<&String>) -> i32 {
         value.map_or(ReactionOperation::Unspecified as i32, |s| {
-            match s.as_str() {
-                "added" => ReactionOperation::Added as i32,
-                "removed" => ReactionOperation::Removed as i32,
-                "both" => ReactionOperation::Both as i32,
-                _ => {
-                    tracing::warn!("Unknown reaction_operation value in DB: '{}'", s);
-                    ReactionOperation::Unspecified as i32
-                }
-            }
+            reaction_operation_from_str(s).unwrap_or_else(|| {
+                tracing::warn!("Unknown reaction_operation value in DB: '{}'", s);
+                ReactionOperation::Unspecified
+            }) as i32
         })
     }
 
@@ -101,6 +96,16 @@ impl SlackEventHandlerRow {
                 execution_target,
             }),
         }
+    }
+}
+
+/// The operation a stored or exported name ("added", "removed", "both") stands for.
+pub fn reaction_operation_from_str(value: &str) -> Option<ReactionOperation> {
+    match value {
+        "added" => Some(ReactionOperation::Added),
+        "removed" => Some(ReactionOperation::Removed),
+        "both" => Some(ReactionOperation::Both),
+        _ => None,
     }
 }
 

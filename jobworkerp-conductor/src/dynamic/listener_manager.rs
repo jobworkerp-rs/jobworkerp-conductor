@@ -14,14 +14,26 @@ use tokio::task::JoinHandle;
 /// リスナーの起動・停止・更新を安全に実行する。
 #[derive(Clone)]
 pub struct DynamicListenerManager {
-    active_listeners: Arc<tokio::sync::Mutex<HashMap<String, ListenerHandle>>>,
+    /// Keyed by handler id: by the time a change event arrives the local
+    /// store already holds the new (or no) entry, so the old name is gone.
+    active_listeners: Arc<tokio::sync::Mutex<HashMap<i64, ListenerHandle>>>,
     local_config_store: SharedLocalConfigStore,
     execution_ref_recorder: shared::SharedExecutionRefRecorder,
 }
 
 struct ListenerHandle {
+    name: String,
     task_handle: JoinHandle<Result<()>>,
     shutdown_sender: oneshot::Sender<()>,
+}
+
+impl ListenerHandle {
+    /// Stops the listener and hands back its name for logging.
+    async fn stop(self) -> String {
+        let _ = self.shutdown_sender.send(());
+        let _ = self.task_handle.await;
+        self.name
+    }
 }
 
 impl DynamicListenerManager {
@@ -75,10 +87,7 @@ impl DynamicListenerManager {
         let name = handler_data.name.clone();
 
         // 既存のリスナーが存在する場合は停止
-        if let Some(handle) = self.active_listeners.lock().await.remove(&name) {
-            let _ = handle.shutdown_sender.send(());
-            let _ = handle.task_handle.await;
-        }
+        self.remove_listener_by_id(handler_id).await?;
 
         // ローカル設定からリスナー設定を作成
         let listener_setting = self
@@ -100,6 +109,7 @@ impl DynamicListenerManager {
         });
 
         let handle = ListenerHandle {
+            name: name.clone(),
             task_handle,
             shutdown_sender,
         };
@@ -107,7 +117,7 @@ impl DynamicListenerManager {
         self.active_listeners
             .lock()
             .await
-            .insert(name.clone(), handle);
+            .insert(handler_id.value, handle);
         tracing::info!(
             "Added WorkerResultHandler: id={}, name={}",
             handler_id.value,
@@ -153,35 +163,16 @@ impl DynamicListenerManager {
         &self,
         handler_id: &proto::jobworkerp_conductor::data::WorkerResultHandlerId,
     ) -> Result<()> {
-        let name = {
-            let store = self.local_config_store.read().unwrap();
-            store
-                .get_worker_result_handler(handler_id)
-                .and_then(|h| h.data.as_ref())
-                .map(|d| d.name.clone())
-        };
-
-        if let Some(name) = name {
-            if let Some(handle) = self.active_listeners.lock().await.remove(&name) {
-                let _ = handle.shutdown_sender.send(());
-                let _ = handle.task_handle.await;
-                tracing::info!(
-                    "Removed WorkerResultHandler: id={}, name={}",
-                    handler_id.value,
-                    name
-                );
-            }
+        let handle = self.active_listeners.lock().await.remove(&handler_id.value);
+        if let Some(handle) = handle {
+            let name = handle.stop().await;
+            tracing::info!(
+                "Removed WorkerResultHandler: id={}, name={}",
+                handler_id.value,
+                name
+            );
         }
 
-        Ok(())
-    }
-
-    pub async fn remove_listener(&self, name: &str) -> Result<()> {
-        if let Some(handle) = self.active_listeners.lock().await.remove(name) {
-            let _ = handle.shutdown_sender.send(());
-            let _ = handle.task_handle.await;
-            tracing::info!("Stopped job result listener: {}", name);
-        }
         Ok(())
     }
 
@@ -189,8 +180,7 @@ impl DynamicListenerManager {
         let handles: Vec<_> = self.active_listeners.lock().await.drain().collect();
 
         for (_, handle) in handles {
-            let _ = handle.shutdown_sender.send(());
-            let _ = handle.task_handle.await;
+            handle.stop().await;
         }
 
         tracing::info!("Stopped all job result listeners");
@@ -419,5 +409,97 @@ mod tests {
         // 全停止
         let _ = manager.stop_all().await;
         assert_eq!(manager.active_listener_count(), 0);
+    }
+
+    mod events {
+        use super::*;
+        use proto::jobworkerp_conductor::data::{WorkerResultHandler, WorkerResultHandlerId};
+        use shared::config_events_proto::ConfigChangeEventWrapper as Event;
+        use std::collections::HashMap;
+
+        const ID: WorkerResultHandlerId = WorkerResultHandlerId { value: 100 };
+
+        fn handler(name: &str) -> WorkerResultHandler {
+            WorkerResultHandler {
+                id: Some(ID),
+                data: Some(WorkerResultHandlerData {
+                    name: name.to_string(),
+                    enabled: true,
+                    workflow_url: "file://wf.yaml".to_string(),
+                    listen_worker_name: "source".to_string(),
+                    listen_jobworkerp_server_id: Some(JobworkerpServerId { value: 1 }),
+                    process_jobworkerp_server_id: Some(JobworkerpServerId { value: 1 }),
+                    ..Default::default()
+                }),
+            }
+        }
+
+        /// A manager running listener `name` against a port that accepts
+        /// connections, so the listener starts without a jobworkerp server.
+        async fn running(name: &str) -> (DynamicListenerManager, tokio::net::TcpListener) {
+            let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let store = Arc::new(RwLock::new(LocalConfigStore::new()));
+            {
+                let mut store = store.write().unwrap();
+                store
+                    .upsert_jobworkerp_server(JobworkerpServer {
+                        id: Some(JobworkerpServerId { value: 1 }),
+                        data: Some(JobworkerpServerData {
+                            name: "local".to_string(),
+                            host: "127.0.0.1".to_string(),
+                            port: socket.local_addr().unwrap().port().to_string(),
+                            enabled: true,
+                            ..Default::default()
+                        }),
+                    })
+                    .unwrap();
+                store.upsert_worker_result_handler(handler(name)).unwrap();
+            }
+            let manager = DynamicListenerManager::new_with_local_config(store);
+            manager.add_listener_from_local(&ID).await.unwrap();
+            assert_eq!(manager.active_listener_count(), 1);
+            (manager, socket)
+        }
+
+        // The config change loop updates the local store before it tells the
+        // manager, so the manager must not rely on the store's old entry.
+        #[tokio::test]
+        async fn a_deleted_listener_stops_after_the_store_dropped_it() {
+            let (manager, _socket) = running("on-result").await;
+            manager
+                .local_config_store
+                .write()
+                .unwrap()
+                .remove_worker_result_handler(&ID);
+            let deleted = Event::create_worker_result_handler_deleted(
+                "on-result".to_string(),
+                Some(ID),
+                None,
+                HashMap::new(),
+            );
+            manager.update_listener_from_event(&deleted).await.unwrap();
+            assert_eq!(manager.active_listener_count(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_renamed_listener_replaces_the_old_one() {
+            let (manager, _socket) = running("old-name").await;
+            let renamed = handler("new-name");
+            manager
+                .local_config_store
+                .write()
+                .unwrap()
+                .upsert_worker_result_handler(renamed.clone())
+                .unwrap();
+            let updated = Event::create_worker_result_handler_updated(
+                "new-name".to_string(),
+                Some(ID),
+                renamed.data,
+                HashMap::new(),
+            );
+            manager.update_listener_from_event(&updated).await.unwrap();
+            assert_eq!(manager.active_listener_count(), 1);
+            manager.stop_all().await.unwrap();
+        }
     }
 }

@@ -1,0 +1,82 @@
+# All-in-one image: conductor-main and the jobworkerp all-in-one server in one
+# container, supervised by conductor-main/all-in-one/conductor-all-in-one under
+# tini (README "All-in-one image"). Before building, the release workflow puts
+# the conductor release archive into dist/all-in-one/linux-<arch>/conductor/
+# and the output of scripts/fetch-all-in-one-inputs.sh into
+# dist/all-in-one/linux-<arch>/vendor/ (amd64, arm64).
+#
+# As in conductor-main/Dockerfile, commands run only in the preparation stage,
+# on the build host's platform; the final stage just copies files, so a
+# multi-platform build needs no emulation. Debian trixie provides the glibc
+# 2.39+ and libstdc++ of GCC 14 the jobworkerp binary links; jobworkerp also
+# refuses to start without the system CA store, and compiles runner schemas
+# with protoc at run time. Base images are pinned by digest (multi-platform
+# index).
+
+FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS prepare
+
+# The account matches the conductor-only image (system user "conductor",
+# uid 100, group nogroup, home owned by group daemon) so a volume can move
+# between the images.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 100 --gid nogroup --home-dir /home/conductor \
+        --no-create-home --shell /usr/sbin/nologin conductor \
+    && mkdir -p /home/conductor/jobworkerp /home/conductor/plugins \
+    && chown -R conductor:daemon /home/conductor
+
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+
+ARG TARGETARCH
+# The release workflow passes the versions from vendor/versions.env and the
+# release tag; verify-all-in-one-image.sh checks the labels against the
+# bundled binaries.
+ARG CONDUCTOR_VERSION
+ARG JOBWORKERP_VERSION
+ARG TINI_VERSION
+ARG PROTOC_VERSION
+LABEL org.opencontainers.image.source=https://github.com/jobworkerp-rs/jobworkerp-conductor \
+    org.opencontainers.image.version=${CONDUCTOR_VERSION} \
+    io.jobworkerp.all-in-one.jobworkerp-version=${JOBWORKERP_VERSION} \
+    io.jobworkerp.all-in-one.tini-version=${TINI_VERSION} \
+    io.jobworkerp.all-in-one.protoc-version=${PROTOC_VERSION}
+
+COPY --from=prepare /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/
+# The per-certificate entries in /etc/ssl/certs link into
+# /usr/share/ca-certificates; copy both so none of them dangles.
+COPY --from=prepare /etc/ssl/certs /etc/ssl/certs
+COPY --from=prepare /usr/share/ca-certificates /usr/share/ca-certificates
+COPY --from=prepare --chown=conductor:daemon /home/conductor /home/conductor
+# Executables live outside /home/conductor, the data volume: an image update
+# must not be shadowed by binaries a volume kept from an older image.
+COPY --chmod=0755 \
+    dist/all-in-one/linux-${TARGETARCH}/conductor/conductor-main \
+    dist/all-in-one/linux-${TARGETARCH}/vendor/bin/all-in-one \
+    dist/all-in-one/linux-${TARGETARCH}/vendor/bin/tini \
+    dist/all-in-one/linux-${TARGETARCH}/vendor/bin/protoc \
+    conductor-main/all-in-one/conductor-all-in-one \
+    /usr/local/bin/
+COPY dist/all-in-one/linux-${TARGETARCH}/conductor/LICENSE \
+    dist/all-in-one/linux-${TARGETARCH}/conductor/THIRD-PARTY-LICENSES.txt \
+    /usr/share/doc/jobworkerp-conductor/
+COPY dist/all-in-one/linux-${TARGETARCH}/vendor/licenses/jobworkerp-rs/ /usr/share/doc/jobworkerp-rs/
+COPY dist/all-in-one/linux-${TARGETARCH}/vendor/licenses/tini/ /usr/share/doc/tini/
+COPY dist/all-in-one/linux-${TARGETARCH}/vendor/licenses/protobuf/ /usr/share/doc/protobuf/
+# protoc finds its well-known types in ../include relative to itself.
+COPY dist/all-in-one/linux-${TARGETARCH}/vendor/include/ /usr/local/include/
+
+WORKDIR /home/conductor
+USER conductor
+
+# 9090: conductor admin API. 9000: jobworkerp gRPC, which listens on loopback
+# only unless JW_GRPC_ADDR says otherwise.
+EXPOSE 9090 9000
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --start-interval=2s --retries=3 \
+    CMD ["/usr/local/bin/conductor-all-in-one", "health"]
+
+# tini reaps orphaned job processes and forwards signals to the entrypoint
+# only (no -g): the entrypoint stops conductor before jobworkerp itself.
+ENTRYPOINT ["/usr/local/bin/tini", "--", "/usr/local/bin/conductor-all-in-one"]
+CMD ["run"]

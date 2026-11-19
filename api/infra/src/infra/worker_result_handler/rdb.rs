@@ -1,5 +1,5 @@
 use super::rows::WorkerResultHandlerRow;
-use crate::error::UiEventHandlerError;
+use crate::error::{is_unique_violation, UiEventHandlerError};
 use crate::infra::IdGeneratorWrapper;
 use crate::infra::UseIdGenerator;
 use anyhow::{Context, Result};
@@ -100,17 +100,12 @@ pub trait WorkerResultHandlerRepository: UseRdbPool + UseIdGenerator + Sync + Se
             .into()),
             Err(e) => {
                 // Check for unique constraint violation
-                if let sqlx::Error::Database(db_error) = &e {
-                    if db_error
-                        .code()
-                        .is_some_and(|code| code == "2067" || code == "1062")
-                    {
-                        return Err(UiEventHandlerError::AlreadyExists(format!(
-                            "WorkerResultHandler name '{}' already exists",
-                            worker_result_handler.name
-                        ))
-                        .into());
-                    }
+                if is_unique_violation(&e) {
+                    return Err(UiEventHandlerError::AlreadyExists(format!(
+                        "WorkerResultHandler name '{}' already exists",
+                        worker_result_handler.name
+                    ))
+                    .into());
                 }
                 return Err(UiEventHandlerError::DBError(e).into());
             }

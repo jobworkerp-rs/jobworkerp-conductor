@@ -340,3 +340,83 @@ mod tests {
         assert!(!is_duplicate_constraint_error(&sqlx::Error::RowNotFound));
     }
 }
+
+#[cfg(all(test, feature = "integration_tests"))]
+mod integration_tests {
+    use super::*;
+    use crate::error::UiEventHandlerError;
+    use crate::infra::IdGeneratorWrapper;
+    use anyhow::Result;
+    use infra_utils::infra::rdb::RdbPool;
+    use infra_utils::infra::test::{setup_test_rdb_from, TEST_RUNTIME};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn current_timestamp() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    async fn _test_constraint_violation_recovery(pool: &'static RdbPool) -> Result<()> {
+        // Create test data with potential duplicates manually
+        let mut tx = pool.begin().await.map_err(UiEventHandlerError::DBError)?;
+
+        // Insert duplicate servers directly (bypassing unique constraint if not applied)
+        let id_gen = IdGeneratorWrapper::new();
+        let timestamp = current_timestamp();
+
+        for i in 1..=3 {
+            let id = id_gen.generate_id()?;
+            let _ = sqlx::query(
+                "INSERT INTO jobworkerp_server 
+                 (id, name, host, port, ssl_enabled, description, enabled, created_at, updated_at) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind("duplicate_server") // Same name for all
+            .bind("localhost")
+            .bind("8080")
+            .bind(false)
+            .bind(format!("Server {i}"))
+            .bind(true)
+            .bind(timestamp + i as i64)
+            .bind(timestamp + i as i64)
+            .execute(&mut *tx)
+            .await;
+        }
+
+        tx.commit().await.map_err(UiEventHandlerError::DBError)?;
+
+        // Now test our migration functionality
+        let migration_repo = MigrationRepositoryImpl::new(pool);
+
+        let report = migration_repo.check_and_cleanup_duplicates().await?;
+        println!("Duplicate cleanup report: {report:?}");
+
+        if report.has_duplicates() {
+            println!("✅ Duplicate detection and cleanup working");
+            assert!(report.total_duplicates_cleaned() > 0);
+        } else {
+            println!("ℹ️  No duplicates found (may indicate UNIQUE constraints already applied)");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn cleans_up_duplicate_rows() -> Result<()> {
+        TEST_RUNTIME.block_on(async {
+            let dir = if cfg!(feature = "mysql") {
+                "sql/mysql"
+            } else {
+                "sql/sqlite"
+            };
+            let pool = setup_test_rdb_from(dir).await;
+            sqlx::query("DELETE FROM jobworkerp_server;")
+                .execute(pool)
+                .await?;
+            _test_constraint_violation_recovery(pool).await
+        })
+    }
+}

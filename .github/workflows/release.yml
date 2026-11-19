@@ -5,10 +5,11 @@ name: Release
 # The release sync pushes a vMAJOR.MINOR.PATCH tag, which builds conductor-main
 # for every supported platform, attaches the archives, SHA256SUMS and build
 # provenance attestations to the GitHub Release for the tag, and then
-# publishes a multi-platform container image built from the same Linux
-# binaries. Tests run in the private CI before a release is tagged; this
-# workflow only builds, so that the build of every published artifact is
-# publicly visible.
+# publishes two multi-platform container images built from the same Linux
+# binaries: conductor alone, and the all-in-one image that bundles the
+# jobworkerp all-in-one server (verified on each architecture first). Tests
+# run in the private CI before a release is tagged; this workflow only
+# builds, so that the build of every published artifact is publicly visible.
 #
 # Only a tag push (which needs write access) may start this workflow, the
 # build jobs get a read-only token and run on GitHub-hosted runners only, and
@@ -39,6 +40,7 @@ env:
   RUST_BACKTRACE: '1'
   BINARY: conductor-main
   IMAGE: ghcr.io/jobworkerp-rs/jobworkerp-conductor
+  AIO_IMAGE: ghcr.io/jobworkerp-rs/jobworkerp-conductor-all-in-one
 
 jobs:
   # The license listing of every crate linked into the binaries, shipped in
@@ -306,5 +308,161 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  # Builds the all-in-one image for one architecture on its native runner,
+  # with the same builder and inputs as the publish job, and runs it through
+  # verify-all-in-one-image.sh. Nothing is pushed; arm64 is exercised only
+  # here.
+  all-in-one-verify:
+    name: Verify all-in-one image (${{ matrix.arch }})
+    if: github.server_url == 'https://github.com'
+    needs: publish
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs_on: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            runs_on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download Linux archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: linux-*
+          path: archives
+          merge-multiple: true
+
+      # dist/all-in-one/linux-<arch>/{conductor,vendor}: the release archive
+      # and the pinned third-party inputs, as conductor-main/Dockerfile.all-in-one
+      # expects.
+      - name: Prepare inputs
+        id: inputs
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          dir="dist/all-in-one/linux-${ARCH}"
+          mkdir -p "${dir}/conductor"
+          tar -xzf "archives/${BINARY}-${TARGET}.tar.gz" -C "${dir}/conductor" --strip-components=1
+          bash scripts/fetch-all-in-one-inputs.sh "${ARCH}" "${dir}/vendor"
+          cat "${dir}/vendor/versions.env" >>"${GITHUB_OUTPUT}"
+          echo "CONDUCTOR_VERSION=${GITHUB_REF_NAME#v}" >>"${GITHUB_OUTPUT}"
+          # Records the runner's Docker in the log; arm64 is built only here.
+          docker version
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: conductor-main/Dockerfile.all-in-one
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          tags: ${{ env.AIO_IMAGE }}:verify
+          # Labels are defined in the Dockerfile from these values.
+          build-args: |
+            CONDUCTOR_VERSION=${{ steps.inputs.outputs.CONDUCTOR_VERSION }}
+            JOBWORKERP_VERSION=${{ steps.inputs.outputs.JOBWORKERP_VERSION }}
+            TINI_VERSION=${{ steps.inputs.outputs.TINI_VERSION }}
+            PROTOC_VERSION=${{ steps.inputs.outputs.PROTOC_VERSION }}
+
+      - name: Verify image
+        env:
+          CONDUCTOR_VERSION: ${{ steps.inputs.outputs.CONDUCTOR_VERSION }}
+          JOBWORKERP_VERSION: ${{ steps.inputs.outputs.JOBWORKERP_VERSION }}
+        run: bash scripts/verify-all-in-one-image.sh "${AIO_IMAGE}:verify" "${CONDUCTOR_VERSION}" "${JOBWORKERP_VERSION}"
+
+  # Pushes the all-in-one image once every architecture passed verification,
+  # rebuilt from the same pinned inputs (base digest, release archives,
+  # SHA-256-pinned third-party files).
+  all-in-one-image:
+    name: Publish all-in-one image
+    if: github.server_url == 'https://github.com'
+    needs: all-in-one-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download Linux archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: linux-*
+          path: archives
+          merge-multiple: true
+
+      # Labels describe both platforms, so their bundled versions must match.
+      - name: Prepare inputs
+        id: inputs
+        run: |
+          for pair in amd64:x86_64-unknown-linux-musl arm64:aarch64-unknown-linux-musl; do
+            dir="dist/all-in-one/linux-${pair%%:*}"
+            mkdir -p "${dir}/conductor"
+            tar -xzf "archives/${BINARY}-${pair#*:}.tar.gz" -C "${dir}/conductor" --strip-components=1
+            bash scripts/fetch-all-in-one-inputs.sh "${pair%%:*}" "${dir}/vendor"
+          done
+          cmp dist/all-in-one/linux-amd64/vendor/versions.env dist/all-in-one/linux-arm64/vendor/versions.env
+          cat dist/all-in-one/linux-amd64/vendor/versions.env >>"${GITHUB_OUTPUT}"
+          echo "CONDUCTOR_VERSION=${GITHUB_REF_NAME#v}" >>"${GITHUB_OUTPUT}"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: conductor-main/Dockerfile.all-in-one
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.AIO_IMAGE }}:${{ github.ref_name }}
+            ${{ env.AIO_IMAGE }}:latest
+          # Labels are defined in the Dockerfile from these values.
+          build-args: |
+            CONDUCTOR_VERSION=${{ steps.inputs.outputs.CONDUCTOR_VERSION }}
+            JOBWORKERP_VERSION=${{ steps.inputs.outputs.JOBWORKERP_VERSION }}
+            TINI_VERSION=${{ steps.inputs.outputs.TINI_VERSION }}
+            PROTOC_VERSION=${{ steps.inputs.outputs.PROTOC_VERSION }}
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.AIO_IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true

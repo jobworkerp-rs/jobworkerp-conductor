@@ -36,6 +36,8 @@ impl CronScheduler {
         let mut settings = vec![];
         let mut guids = vec![];
         scheduler.shutdown_on_ctrl_c();
+        #[cfg(unix)]
+        scheduler.shutdown_on_signal(tokio::signal::unix::SignalKind::terminate());
 
         scheduler.set_shutdown_handler(Box::new(|| {
             Box::pin(async move {
@@ -115,8 +117,7 @@ impl CronScheduler {
         // tick every 500 msec for cron job
         if self.scheduler.inited().await {
             self.scheduler.start().await?;
-            // wait for ctrl-c
-            tokio::signal::ctrl_c().await?;
+            command_utils::util::shutdown::shutdown_signal().await;
         } else {
             tracing::info!("cron scheduler not inited");
         }
@@ -166,6 +167,8 @@ mod tests {
         let jobworkerp = JobWorkerpSetting {
             name: "test".to_string(),
             address: "http://localhost:9000".to_string(),
+            description: None,
+            enabled: None,
         };
         let jobworkerp = Arc::new(
             JobworkerpClientWrapper::new(&jobworkerp.address, None)

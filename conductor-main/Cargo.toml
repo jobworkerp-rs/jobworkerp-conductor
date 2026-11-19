@@ -47,6 +47,7 @@ stretto = { workspace = true }
 #slack-morphism = { workspace = true }
 tokio = { workspace = true }
 tokio-cron-scheduler = { workspace = true, features = ["signal"] }
+tonic = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -1,5 +1,5 @@
 use super::rows::{reaction_operation_to_db, SlackEventHandlerRow};
-use crate::error::UiEventHandlerError;
+use crate::error::{is_unique_violation, UiEventHandlerError};
 use crate::infra::IdGeneratorWrapper;
 use crate::infra::UseIdGenerator;
 use anyhow::{Context, Result};
@@ -111,17 +111,12 @@ pub trait SlackEventHandlerRepository: UseRdbPool + UseIdGenerator + Sync + Send
             .into()),
             Err(e) => {
                 // Check for unique constraint violation
-                if let sqlx::Error::Database(db_error) = &e {
-                    if db_error
-                        .code()
-                        .is_some_and(|code| code == "2067" || code == "1062")
-                    {
-                        return Err(UiEventHandlerError::AlreadyExists(format!(
-                            "SlackEventHandler name '{}' already exists",
-                            slack_event_handler.name
-                        ))
-                        .into());
-                    }
+                if is_unique_violation(&e) {
+                    return Err(UiEventHandlerError::AlreadyExists(format!(
+                        "SlackEventHandler name '{}' already exists",
+                        slack_event_handler.name
+                    ))
+                    .into());
                 }
                 Err(UiEventHandlerError::DBError(e).into())
             }

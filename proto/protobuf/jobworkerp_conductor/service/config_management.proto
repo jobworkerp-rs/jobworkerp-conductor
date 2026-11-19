@@ -9,8 +9,8 @@ import "google/protobuf/empty.proto";
 // Request message for importing workflows.toml file content into the system
 message ImportTomlRequest {
     string toml_content = 1;                                    // TOML file content string
-    bool overwrite_existing = 2;                                // Flag to allow overwriting existing data
-    bool validate_only = 3;                                     // Validation-only mode (do not actually import)
+    bool overwrite_existing = 2;                                // Delete every existing setting first, then import
+    bool validate_only = 3;                                     // Run the import and roll it back: counts and errors, nothing written
 }
 
 // TOML configuration import response (with detailed results)
@@ -18,10 +18,11 @@ message ImportTomlRequest {
 message ImportTomlResponse {
     bool is_success = 1;                                        // Import success/failure flag
     string message = 2;                                         // Processing result message
-    int32 imported_servers = 3;                                 // Number of imported servers
+    int32 imported_servers = 3;                                 // Number of imported servers (all imported_* are 0 unless is_success)
     int32 imported_schedulers = 4;                              // Number of imported schedulers
     int32 imported_listeners = 5;                               // Number of imported listeners
     repeated string validation_errors = 6;                      // Detailed validation error message list
+    int32 imported_slack_handlers = 7;                          // Number of imported Slack event handlers
 }
 
 // TOML configuration export request (with filtering options)
@@ -36,6 +37,7 @@ message ExportTomlResponse {
     bool is_success = 1;                                        // Export success/failure flag
     string message = 2;                                         // Processing result message
     string toml_content = 3;                                    // Generated TOML file content
+    repeated string left_out = 4;                               // Entries not in the file: they run on a server that no longer exists
 }
 
 // Configuration error types (for detailed error reporting)

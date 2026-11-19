@@ -5,7 +5,6 @@
 use clap::{Parser, Subcommand};
 use command_utils::util::tracing::LoggingConfig;
 use jobworkerp_handler::settings::WorkflowSettings;
-use tokio::signal;
 use tokio::sync::watch;
 
 #[derive(Parser, Debug)]
@@ -29,6 +28,10 @@ enum Command {
 
     /// Unregister conductor admin workers and FunctionSet from a jobworkerp server
     UnregisterWorkers(UnregisterWorkersArgs),
+
+    /// Register the jobworkerp server on a running conductor and the conductor
+    /// admin workers on that jobworkerp server; safe to run repeatedly
+    Bootstrap(BootstrapArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -55,6 +58,30 @@ struct RegisterWorkersArgs {
         default_value = "http://localhost:9090"
     )]
     conductor_grpc_url: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct BootstrapArgs {
+    /// jobworkerp server gRPC endpoint
+    #[arg(long, env = "JOBWORKERP_URL")]
+    jobworkerp_url: String,
+
+    /// Conductor gRPC endpoint (admin API of the running conductor)
+    #[arg(
+        long,
+        env = "CONDUCTOR_GRPC_URL",
+        default_value = "http://localhost:9090"
+    )]
+    conductor_grpc_url: String,
+
+    /// Name of the JobworkerpServer record to create or keep up to date
+    #[arg(long, default_value = "local")]
+    server_name: String,
+
+    /// Seconds to wait for each of conductor and jobworkerp to accept connections
+    /// (0 tries once); a pending attempt may run up to 1 second longer
+    #[arg(long, default_value_t = 30)]
+    wait_timeout_sec: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -111,6 +138,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Some(Command::UnregisterWorkers(uw_args)) => {
             shared::worker_registration::unregister_conductor_workers(&uw_args.jobworkerp_url)
                 .await?;
+            Ok(())
+        }
+        Some(Command::Bootstrap(b_args)) => {
+            conductor_main::bootstrap::run_bootstrap(&conductor_main::bootstrap::BootstrapConfig {
+                jobworkerp_url: b_args.jobworkerp_url,
+                conductor_grpc_url: b_args.conductor_grpc_url,
+                server_name: b_args.server_name,
+                wait_timeout: std::time::Duration::from_secs(b_args.wait_timeout_sec),
+            })
+            .await?;
             Ok(())
         }
     }
@@ -210,8 +247,7 @@ async fn run_db_driven_mode() -> Result<(), Box<dyn std::error::Error + Send + S
 
     // 6. Graceful shutdown monitoring
     let grpc_server_result = tokio::select! {
-        signal_result = signal::ctrl_c() => {
-            signal_result?;
+        _ = command_utils::util::shutdown::shutdown_signal() => {
             tracing::info!("Shutdown signal received");
             let _ = shutdown_sender.send(true);
             None

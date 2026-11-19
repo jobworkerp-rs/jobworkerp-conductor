@@ -1,4 +1,6 @@
 use anyhow::{bail, Context, Result};
+
+use crate::grpc_endpoint::{parse_grpc_endpoint, GrpcEndpoint};
 use jobworkerp_client::client::JobworkerpClient;
 use jobworkerp_client::jobworkerp::data::WorkerId;
 use jobworkerp_client::jobworkerp::function::data::{
@@ -8,17 +10,47 @@ use jobworkerp_client::jobworkerp::function::service::{
     create_worker_request::Runner as RunnerOneof, CreateWorkerRequest, FindByNameRequest,
 };
 
-const FUNCTION_SET_NAME: &str = "conductor-admin";
+pub const FUNCTION_SET_NAME: &str = "conductor-admin";
 const FUNCTION_SET_DESCRIPTION: &str = "jobworkerp-conductor admin API. Provides CRUD operations for jobworkerp server info, cron schedulers, Slack event handlers, and worker result handlers.";
 #[cfg(test)]
-const WORKER_NAME_PREFIX: &str = "conductor.";
+const WORKER_NAME_PREFIX: &str = "conductor_";
+
+/// GRPC runner methods (`using`), as opposed to the RPC a worker calls.
+const RUNNER_USING_UNARY: &str = "unary";
+const RUNNER_USING_STREAMING: &str = "streaming";
 
 struct ConductorWorkerDef {
     name: &'static str,
     grpc_method: &'static str,
     description: &'static str,
-    #[allow(dead_code)] // used in tests for definition correctness validation
     is_streaming: bool,
+}
+
+impl ConductorWorkerDef {
+    /// The GRPC runner method that matches the RPC. jobworkerp exposes every
+    /// runner method of a FunctionSet target without `using`, and a unary
+    /// call to a server-streaming RPC silently returns only the first item.
+    fn using(&self) -> &'static str {
+        if self.is_streaming {
+            RUNNER_USING_STREAMING
+        } else {
+            RUNNER_USING_UNARY
+        }
+    }
+}
+
+fn function_using(worker_id: WorkerId, def: &ConductorWorkerDef) -> FunctionUsing {
+    FunctionUsing {
+        function_id: Some(FunctionId {
+            id: Some(FunctionIdInner::WorkerId(worker_id)),
+        }),
+        using: Some(def.using().to_string()),
+    }
+}
+
+/// How many admin workers `register_conductor_workers` registers.
+pub fn conductor_worker_count() -> usize {
+    conductor_worker_definitions().len()
 }
 
 fn conductor_worker_definitions() -> Vec<ConductorWorkerDef> {
@@ -32,106 +64,106 @@ fn conductor_worker_definitions() -> Vec<ConductorWorkerDef> {
     vec![
         // JobworkerpServerService (read-only: FindByName + FindList only)
         ConductorWorkerDef {
-            name: "conductor.jobworkerp-server.find-by-name",
+            name: "conductor_jobworkerp-server_find-by-name",
             grpc_method: "jobworkerp_conductor.service.JobworkerpServerService/FindByName",
             description: "Find a jobworkerp server by name",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.jobworkerp-server.find-list",
+            name: "conductor_jobworkerp-server_find-list",
             grpc_method: "jobworkerp_conductor.service.JobworkerpServerService/FindList",
             description: "List all jobworkerp servers",
             is_streaming: true,
         },
         // CronSchedulerService
         ConductorWorkerDef {
-            name: "conductor.cron-scheduler.create",
+            name: "conductor_cron-scheduler_create",
             grpc_method: "jobworkerp_conductor.service.CronSchedulerService/Create",
             description: "Create a new cron scheduler in jobworkerp-conductor",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.cron-scheduler.update",
+            name: "conductor_cron-scheduler_update",
             grpc_method: "jobworkerp_conductor.service.CronSchedulerService/Update",
             description: "Update an existing cron scheduler in jobworkerp-conductor",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.cron-scheduler.delete",
+            name: "conductor_cron-scheduler_delete",
             grpc_method: "jobworkerp_conductor.service.CronSchedulerService/Delete",
             description: "Delete a cron scheduler from jobworkerp-conductor",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.cron-scheduler.find-by-name",
+            name: "conductor_cron-scheduler_find-by-name",
             grpc_method: "jobworkerp_conductor.service.CronSchedulerService/FindByName",
             description: "Find a cron scheduler by name",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.cron-scheduler.find-list",
+            name: "conductor_cron-scheduler_find-list",
             grpc_method: "jobworkerp_conductor.service.CronSchedulerService/FindList",
             description: "List all cron schedulers",
             is_streaming: true,
         },
         // WorkerResultHandlerService
         ConductorWorkerDef {
-            name: "conductor.worker-result-handler.create",
+            name: "conductor_worker-result-handler_create",
             grpc_method: "jobworkerp_conductor.service.WorkerResultHandlerService/Create",
             description: "Create a new worker result handler in jobworkerp-conductor",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.worker-result-handler.update",
+            name: "conductor_worker-result-handler_update",
             grpc_method: "jobworkerp_conductor.service.WorkerResultHandlerService/Update",
             description: "Update an existing worker result handler in jobworkerp-conductor",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.worker-result-handler.delete",
+            name: "conductor_worker-result-handler_delete",
             grpc_method: "jobworkerp_conductor.service.WorkerResultHandlerService/Delete",
             description: "Delete a worker result handler from jobworkerp-conductor",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.worker-result-handler.find-by-name",
+            name: "conductor_worker-result-handler_find-by-name",
             grpc_method: "jobworkerp_conductor.service.WorkerResultHandlerService/FindByName",
             description: "Find a worker result handler by name",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.worker-result-handler.find-list",
+            name: "conductor_worker-result-handler_find-list",
             grpc_method: "jobworkerp_conductor.service.WorkerResultHandlerService/FindList",
             description: "List all worker result handlers",
             is_streaming: true,
         },
         // SlackEventHandlerService
         ConductorWorkerDef {
-            name: "conductor.slack-event-handler.create",
+            name: "conductor_slack-event-handler_create",
             grpc_method: "jobworkerp_conductor.service.SlackEventHandlerService/Create",
             description: "Create a new Slack event handler in jobworkerp-conductor",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.slack-event-handler.update",
+            name: "conductor_slack-event-handler_update",
             grpc_method: "jobworkerp_conductor.service.SlackEventHandlerService/Update",
             description: "Update an existing Slack event handler in jobworkerp-conductor",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.slack-event-handler.delete",
+            name: "conductor_slack-event-handler_delete",
             grpc_method: "jobworkerp_conductor.service.SlackEventHandlerService/Delete",
             description: "Delete a Slack event handler from jobworkerp-conductor",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.slack-event-handler.find-by-name",
+            name: "conductor_slack-event-handler_find-by-name",
             grpc_method: "jobworkerp_conductor.service.SlackEventHandlerService/FindByName",
             description: "Find a Slack event handler by name",
             is_streaming: false,
         },
         ConductorWorkerDef {
-            name: "conductor.slack-event-handler.find-list",
+            name: "conductor_slack-event-handler_find-list",
             grpc_method: "jobworkerp_conductor.service.SlackEventHandlerService/FindList",
             description: "List all Slack event handlers",
             is_streaming: true,
@@ -139,33 +171,7 @@ fn conductor_worker_definitions() -> Vec<ConductorWorkerDef> {
     ]
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct ConductorGrpcConfig {
-    host: String,
-    port: u32,
-    tls: bool,
-}
-
-fn parse_conductor_url(url: &str) -> Result<ConductorGrpcConfig> {
-    let parsed = url::Url::parse(url).context("Invalid conductor gRPC URL")?;
-
-    let tls = match parsed.scheme() {
-        "http" => false,
-        "https" => true,
-        scheme => bail!("Unsupported scheme: {scheme}. Use http:// or https://"),
-    };
-
-    let host = parsed
-        .host_str()
-        .context("Missing host in URL")?
-        .to_string();
-
-    let port = parsed.port().unwrap_or(if tls { 443 } else { 80 }) as u32;
-
-    Ok(ConductorGrpcConfig { host, port, tls })
-}
-
-fn build_settings_json(config: &ConductorGrpcConfig, grpc_method: &str) -> String {
+fn build_settings_json(config: &GrpcEndpoint, grpc_method: &str) -> String {
     serde_json::json!({
         "host": config.host,
         "port": config.port,
@@ -179,7 +185,7 @@ fn build_settings_json(config: &ConductorGrpcConfig, grpc_method: &str) -> Strin
 
 fn build_create_worker_request(
     def: &ConductorWorkerDef,
-    config: &ConductorGrpcConfig,
+    config: &GrpcEndpoint,
 ) -> CreateWorkerRequest {
     CreateWorkerRequest {
         runner: Some(RunnerOneof::RunnerName("GRPC".to_string())),
@@ -196,15 +202,31 @@ fn build_create_worker_request(
     }
 }
 
+/// How many of the conductor admin workers ended up registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerRegistrationSummary {
+    pub registered: usize,
+    pub total: usize,
+}
+
+impl WorkerRegistrationSummary {
+    pub fn is_complete(&self) -> bool {
+        self.registered == self.total
+    }
+}
+
 /// Register conductor admin workers and FunctionSet on the jobworkerp server.
+///
+/// Fails only when no worker could be registered; callers decide whether a
+/// partial registration is acceptable from the returned summary.
 ///
 /// Uses find-then-create pattern: checks if each worker already exists by name
 /// before attempting creation, since CreateWorker returns a DB error on duplicate names.
 pub async fn register_conductor_workers(
     jobworkerp_url: &str,
     conductor_grpc_url: &str,
-) -> Result<()> {
-    let config = parse_conductor_url(conductor_grpc_url)?;
+) -> Result<WorkerRegistrationSummary> {
+    let config = parse_grpc_endpoint(conductor_grpc_url)?;
     let client = JobworkerpClient::new(jobworkerp_url.to_string(), None)
         .await
         .context("Failed to connect to jobworkerp server")?;
@@ -212,7 +234,7 @@ pub async fn register_conductor_workers(
     println!("Connected to jobworkerp server: {jobworkerp_url}");
 
     let defs = conductor_worker_definitions();
-    let mut registered_worker_ids: Vec<WorkerId> = Vec::with_capacity(defs.len());
+    let mut registered: Vec<(WorkerId, &ConductorWorkerDef)> = Vec::with_capacity(defs.len());
 
     println!("Registering workers...");
     for def in &defs {
@@ -227,17 +249,17 @@ pub async fn register_conductor_workers(
                     "  \u{2713} {} (worker_id={}, {status})",
                     def.name, worker_id.value
                 );
-                registered_worker_ids.push(worker_id);
+                registered.push((worker_id, def));
             }
             Err(e) => {
-                tracing::error!("Failed to register worker {}: {e}", def.name);
-                eprintln!("  \u{2717} {} \u{2014} {e}", def.name);
+                tracing::error!("Failed to register worker {}: {e:#}", def.name);
+                eprintln!("  \u{2717} {} \u{2014} {e:#}", def.name);
             }
         }
     }
 
     let total = defs.len();
-    let succeeded = registered_worker_ids.len();
+    let succeeded = registered.len();
     if succeeded == 0 {
         bail!("No workers were registered (0/{total})");
     }
@@ -248,14 +270,9 @@ pub async fn register_conductor_workers(
         );
     }
 
-    let targets: Vec<FunctionUsing> = registered_worker_ids
+    let targets: Vec<FunctionUsing> = registered
         .iter()
-        .map(|worker_id| FunctionUsing {
-            function_id: Some(FunctionId {
-                id: Some(FunctionIdInner::WorkerId(*worker_id)),
-            }),
-            using: None,
-        })
+        .map(|(worker_id, def)| function_using(*worker_id, def))
         .collect();
 
     let function_set_data = FunctionSetData {
@@ -287,8 +304,7 @@ pub async fn register_conductor_workers(
                 .context("Failed to update FunctionSet")?;
             println!(
                 "  \u{2713} FunctionSet updated (id={}, {} workers)",
-                fs_id.value,
-                registered_worker_ids.len()
+                fs_id.value, succeeded
             );
         }
         None => {
@@ -300,14 +316,16 @@ pub async fn register_conductor_workers(
             let fs_id = resp.id.context("No id in CreateFunctionSetResponse")?;
             println!(
                 "  \u{2713} FunctionSet registered (id={}, {} workers)",
-                fs_id.value,
-                registered_worker_ids.len()
+                fs_id.value, succeeded
             );
         }
     }
 
     println!("Done.");
-    Ok(())
+    Ok(WorkerRegistrationSummary {
+        registered: succeeded,
+        total,
+    })
 }
 
 /// Find an existing worker by name, or create a new one.
@@ -315,7 +333,7 @@ pub async fn register_conductor_workers(
 async fn find_or_create_worker(
     client: &JobworkerpClient,
     def: &ConductorWorkerDef,
-    config: &ConductorGrpcConfig,
+    config: &GrpcEndpoint,
 ) -> Result<(WorkerId, bool)> {
     let existing = client
         .worker_client()
@@ -429,55 +447,17 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn test_parse_conductor_url_http() {
-        let config = parse_conductor_url("http://conductor:9090").unwrap();
-        assert_eq!(config.host, "conductor");
-        assert_eq!(config.port, 9090);
-        assert!(!config.tls);
-    }
-
-    #[test]
-    fn test_parse_conductor_url_https() {
-        let config = parse_conductor_url("https://conductor:9090").unwrap();
-        assert_eq!(config.host, "conductor");
-        assert_eq!(config.port, 9090);
-        assert!(config.tls);
-    }
-
-    #[test]
-    fn test_parse_conductor_url_default_port_http() {
-        let config = parse_conductor_url("http://host").unwrap();
-        assert_eq!(config.port, 80);
-        assert!(!config.tls);
-    }
-
-    #[test]
-    fn test_parse_conductor_url_default_port_https() {
-        let config = parse_conductor_url("https://host").unwrap();
-        assert_eq!(config.port, 443);
-        assert!(config.tls);
-    }
-
-    #[test]
-    fn test_parse_conductor_url_trailing_slash() {
-        let config = parse_conductor_url("http://host:9090/").unwrap();
-        assert_eq!(config.host, "host");
-        assert_eq!(config.port, 9090);
-    }
-
-    #[test]
-    fn test_parse_conductor_url_invalid_scheme() {
-        let result = parse_conductor_url("ftp://host");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Unsupported scheme"));
-    }
-
-    #[test]
-    fn test_parse_conductor_url_empty() {
-        assert!(parse_conductor_url("").is_err());
+    fn test_worker_registration_summary_is_complete_only_when_all_registered() {
+        let all = WorkerRegistrationSummary {
+            registered: 17,
+            total: 17,
+        };
+        let partial = WorkerRegistrationSummary {
+            registered: 16,
+            total: 17,
+        };
+        assert!(all.is_complete());
+        assert!(!partial.is_complete());
     }
 
     #[test]
@@ -518,11 +498,44 @@ mod tests {
         assert_eq!(streaming_count, 4);
 
         for def in &defs {
-            if def.name.ends_with(".find-list") {
+            if def.name.ends_with("_find-list") {
                 assert!(def.is_streaming, "{} should be streaming", def.name);
             } else {
                 assert!(!def.is_streaming, "{} should not be streaming", def.name);
             }
+        }
+    }
+
+    #[test]
+    fn test_function_using_targets_worker_with_its_using() {
+        let defs = conductor_worker_definitions();
+        let unary = defs.iter().find(|d| !d.is_streaming).expect("unary def");
+        let streaming = defs.iter().find(|d| d.is_streaming).expect("streaming def");
+
+        let id = WorkerId { value: 42 };
+        for (def, expected) in [(unary, "unary"), (streaming, "streaming")] {
+            let target = function_using(id, def);
+            assert_eq!(
+                target.function_id,
+                Some(FunctionId {
+                    id: Some(FunctionIdInner::WorkerId(id)),
+                })
+            );
+            assert_eq!(target.using.as_deref(), Some(expected), "{}", def.name);
+        }
+    }
+
+    #[test]
+    fn test_conductor_worker_definitions_names_are_valid_jobworkerp_worker_names() {
+        // jobworkerp's CreateWorker rejects anything but ^[A-Za-z][A-Za-z0-9_-]*$.
+        let is_valid = |name: &str| {
+            name.starts_with(|c: char| c.is_ascii_alphabetic())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        };
+        for def in &conductor_worker_definitions() {
+            assert!(is_valid(def.name), "invalid worker name: {}", def.name);
         }
     }
 
@@ -541,7 +554,7 @@ mod tests {
 
     #[test]
     fn test_build_settings_json() {
-        let config = ConductorGrpcConfig {
+        let config = GrpcEndpoint {
             host: "conductor".to_string(),
             port: 9090,
             tls: false,
@@ -564,7 +577,7 @@ mod tests {
 
     #[test]
     fn test_build_settings_json_tls() {
-        let config = ConductorGrpcConfig {
+        let config = GrpcEndpoint {
             host: "conductor".to_string(),
             port: 443,
             tls: true,
@@ -579,7 +592,7 @@ mod tests {
 
     #[test]
     fn test_build_create_worker_request() {
-        let config = ConductorGrpcConfig {
+        let config = GrpcEndpoint {
             host: "conductor".to_string(),
             port: 9090,
             tls: false,

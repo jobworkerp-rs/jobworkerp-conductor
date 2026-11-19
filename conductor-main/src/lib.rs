@@ -3,6 +3,7 @@ use cron_scheduler::CronScheduler;
 use jobworkerp_handler::settings::WorkflowSettings;
 use tokio::task::JoinSet;
 
+pub mod bootstrap;
 pub mod cron_scheduler;
 
 pub struct ConductorServer {
@@ -27,16 +28,17 @@ impl ConductorServer {
     }
     pub async fn serve(&'static self) -> Result<()> {
         let mut jset = JoinSet::new();
-        // let jh = tokio::spawn(self.jobworkerp_result_listener
-        //     .listen_all());
-        // let cs = tokio::spawn(self.cron_scheduler
-        //     .start());
-        // let res = join_all!(vec![jh, cs]).await;
         jset.spawn(self.jobworkerp_result_listener.listen_all());
         jset.spawn(self.cron_scheduler.start());
 
-        let res = jset.join_all().await;
-        tracing::info!("res: {:?}", res);
+        // Listeners never finish on their own, so the process decides when to
+        // stop; dropping the set aborts whatever is still running.
+        tokio::select! {
+            res = jset.join_all() => tracing::info!("res: {:?}", res),
+            _ = command_utils::util::shutdown::shutdown_signal() => {
+                tracing::info!("Shutdown signal received");
+            }
+        }
         Ok(())
     }
 }

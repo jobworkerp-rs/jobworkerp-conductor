@@ -10,3 +10,4 @@ llm_prompt_worker.yaml
 log/
 mise.toml
 *.log
+/dist/

@@ -24,7 +24,13 @@ pub async fn create_server(
     use_web: bool,
     max_frame_size: Option<u32>,
 ) -> Result<()> {
-    create_server_with_shutdown(addr, use_web, max_frame_size, wait_for_ctrl_c_shutdown()).await
+    create_server_with_shutdown(
+        addr,
+        use_web,
+        max_frame_size,
+        command_utils::util::shutdown::shutdown_signal(),
+    )
+    .await
 }
 
 pub async fn create_server_with_shutdown<F>(
@@ -114,7 +120,7 @@ pub async fn create_server_with_app_module(
         addr,
         use_web,
         max_frame_size,
-        wait_for_ctrl_c_shutdown(),
+        command_utils::util::shutdown::shutdown_signal(),
     )
     .await
 }
@@ -198,14 +204,5 @@ where
             })
             .await
             .map_err(|e| e.into())
-    }
-}
-
-async fn wait_for_ctrl_c_shutdown() {
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => {
-            tracing::info!("received ctrl_c");
-        }
-        Err(e) => tracing::error!("failed to listen for ctrl_c: {:?}", e),
     }
 }

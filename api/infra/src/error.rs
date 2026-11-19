@@ -39,3 +39,9 @@ impl From<RedisError> for UiEventHandlerError {
         UiEventHandlerError::RedisError(e)
     }
 }
+
+/// Whether a write failed on a unique index. Matching vendor codes misses
+/// MySQL, whose `code()` is the SQLSTATE (23000), so ask the driver instead.
+pub fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db_error) if db_error.is_unique_violation())
+}

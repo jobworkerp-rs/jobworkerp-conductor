@@ -13,6 +13,7 @@ command-utils = { path = "../../modules/command-utils" }
 infra-utils = { path = "../../modules/infra-utils" }
 memory-utils = { path = "../../modules/memory-utils" }
 infra = { path = "../infra" }
+jobworkerp-handler = { path = "../../jobworkerp-handler" }
 shared = { path = "../../shared" }
 jobworkerp-conductor = { path = "../../jobworkerp-conductor" }
 jobworkerp-client = { path = "../../modules/jobworkerp-client" }
@@ -22,6 +23,7 @@ async-trait = { workspace = true }
 envy = { workspace = true }
 regex = { workspace = true }
 stretto = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

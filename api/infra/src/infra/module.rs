@@ -36,10 +36,7 @@ impl RepositoryModule {
                 id_generator.clone(),
                 pool.clone(),
             ),
-            config_management_repository: ConfigManagementRepositoryImpl::new(
-                id_generator.clone(),
-                pool,
-            ),
+            config_management_repository: ConfigManagementRepositoryImpl::new(pool),
             execution_ref_repository: ExecutionRefRepositoryImpl::new(id_generator.clone(), pool),
         }
     }

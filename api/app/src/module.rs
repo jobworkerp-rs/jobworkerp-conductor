@@ -43,17 +43,17 @@ impl AppModule {
         );
 
         // App実装を作成（コンストラクタ注入でNotificationServiceを渡す）
-        let worker_result_handler_app = WorkerResultHandlerAppImpl::new(
+        let worker_result_handler_app = Arc::new(WorkerResultHandlerAppImpl::new(
             repositories.worker_result_handler_repository,
             new_memory_cache::<Arc<String>, WorkerResultHandler>(&mc_config),
             notification_service.clone(),
-        );
+        ));
 
-        let jobworkerp_server_app = JobworkerpServerAppImpl::new(
+        let jobworkerp_server_app = Arc::new(JobworkerpServerAppImpl::new(
             repositories.jobworkerp_server_repository.clone(),
             new_memory_cache::<Arc<String>, JobworkerpServer>(&mc_config),
             notification_service.clone(),
-        );
+        ));
 
         // Arc the cron app up front: the execution-status source resolver shares it (one-way:
         // ExecutionStatus → Cron), so it must exist before the execution-status app is built.
@@ -62,12 +62,23 @@ impl AppModule {
             new_memory_cache::<Arc<String>, CronScheduler>(&mc_config),
             notification_service.clone(),
         ));
-        let slack_event_handler_app = SlackEventHandlerAppImpl::new(
+        let slack_event_handler_app = Arc::new(SlackEventHandlerAppImpl::new(
             repositories.slack_event_handler_repository,
             repositories.jobworkerp_server_repository.clone(),
             new_memory_cache::<Arc<String>, SlackEventHandler>(&mc_config),
             notification_service.clone(),
-        );
+        ));
+
+        // The bulk import and clear-all write through the four apps'
+        // repositories and reset their caches, so they share the same apps.
+        let config_management_app = Arc::new(ConfigManagementAppImpl::new(
+            repositories.config_management_repository,
+            jobworkerp_server_app.clone(),
+            cron_scheduler_app.clone(),
+            worker_result_handler_app.clone(),
+            slack_event_handler_app.clone(),
+            notification_service.clone(),
+        ));
 
         // Manual-trigger source resolver: holds a one-way Arc to the cron app (shared below).
         let source_resolver = Arc::new(CronSourceResolver::new(
@@ -76,13 +87,11 @@ impl AppModule {
         ));
 
         AppModule {
-            worker_result_handler_app: Arc::new(worker_result_handler_app),
-            jobworkerp_server_app: Arc::new(jobworkerp_server_app),
+            worker_result_handler_app,
+            jobworkerp_server_app,
             cron_scheduler_app,
-            slack_event_handler_app: Arc::new(slack_event_handler_app),
-            config_management_app: Arc::new(ConfigManagementAppImpl::new(
-                repositories.config_management_repository,
-            )),
+            slack_event_handler_app,
+            config_management_app,
             execution_status_app: Arc::new(ExecutionStatusAppImpl::new(
                 repositories.execution_ref_repository,
                 repositories.jobworkerp_server_repository.clone(),

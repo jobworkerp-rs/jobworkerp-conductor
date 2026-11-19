@@ -12,11 +12,11 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=scripts/lib/fetch-pinned.sh
 source "${SCRIPT_DIR}/lib/fetch-pinned.sh"
-
-PROTOC_VERSION=36.2
+# shellcheck source=scripts/lib/protoc-release.sh
+source "${SCRIPT_DIR}/lib/protoc-release.sh"
 
 dest=${1-}
-base_url=${PROTOC_BASE_URL:-https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}}
+base_url=${PROTOC_BASE_URL:-${PROTOC_RELEASE_URL}}
 platform=${PROTOC_PLATFORM:-$(uname -s)-$(uname -m)}
 
 die() {
@@ -26,31 +26,15 @@ die() {
 
 [[ -n "${dest}" ]] || die "usage: $0 <dest-dir>"
 
-case "${platform}" in
-  Linux-x86_64)
-    asset=protoc-${PROTOC_VERSION}-linux-x86_64.zip
-    sha256=121f6c7afe1d4d0e3ea6aab9432038599250134cbf4474cb1167d2c7decd4278
-    ;;
-  Linux-aarch64)
-    asset=protoc-${PROTOC_VERSION}-linux-aarch_64.zip
-    sha256=8b8f18bd2b30346efbc698dd5a73dd7c805f3ef8380f6dfc95c768f3f1852f6a
-    ;;
-  Darwin-arm64)
-    asset=protoc-${PROTOC_VERSION}-osx-aarch_64.zip
-    sha256=9cd98a532c5c5e0c4161314de0225de27e4c8a323917b6ea7b1b714d3ae23466
-    ;;
-  *)
-    die "no pinned protoc for platform ${platform}"
-    ;;
-esac
+protoc_release "${platform}" || die "no pinned protoc for platform ${platform}"
 
 work=$(mktemp -d)
 trap 'rm -rf "${work}"' EXIT
 
-fetch_pinned "${base_url}/${asset}" "${sha256}" "${work}/${asset}"
+fetch_pinned "${base_url}/${protoc_asset}" "${protoc_sha256}" "${work}/${protoc_asset}"
 
 mkdir -p "${dest}"
-unzip -q -o "${work}/${asset}" -d "${dest}"
+unzip -q -o "${work}/${protoc_asset}" -d "${dest}"
 "${dest}/bin/protoc" --version
 
 export_github_env PROTOC "${dest}/bin/protoc"

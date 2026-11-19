@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+# Entrypoint of the all-in-one image: runs the jobworkerp all-in-one server and
+# conductor-main side by side under tini, and stops both when either one ends.
+#
+#   conductor-all-in-one [run]   start and supervise both servers (default)
+#   conductor-all-in-one health  succeed when both gRPC ports accept connections
+#   conductor-all-in-one CMD...  run CMD with the container environment as is
+#
+# Both servers read variables of the same names (GRPC_ADDR, SQLITE_URL, LOG_*,
+# ...), so the environment is split: unprefixed variables go to conductor,
+# JW_<NAME> goes to jobworkerp as <NAME>, and ALL_IN_ONE_* configures this
+# script. jobworkerp starts from an empty environment plus a short allowlist.
+# Empty variables count as unset. See README "All-in-one image" for the
+# defaults.
+#
+# `set -e` is deliberately off: `wait` reports child exit codes as failures,
+# which must not end the supervisor.
+set -uo pipefail
+
+readonly BIN_DIR=${ALL_IN_ONE_BIN_DIR:-/usr/local/bin}
+readonly DATA_DIR=${ALL_IN_ONE_DATA_DIR:-/home/conductor}
+readonly JOBWORKERP_DIR="${DATA_DIR}/jobworkerp"
+readonly PLUGINS_DIR="${DATA_DIR}/plugins"
+readonly CONDUCTOR_DEFAULT_ADDR=0.0.0.0:9090
+readonly JOBWORKERP_DEFAULT_ADDR=127.0.0.1:9000
+# Passed to jobworkerp although they are unprefixed: process basics and the
+# proxy / CA settings container runtimes inject.
+readonly SHARED_VARS=(PATH HOME TZ LANG HTTP_PROXY HTTPS_PROXY NO_PROXY
+  http_proxy https_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR)
+readonly POLL_INTERVAL=0.2
+
+log() {
+  printf 'conductor-all-in-one: %s\n' "$*" >&2
+}
+
+conductor_addr() {
+  echo "${GRPC_ADDR:-${CONDUCTOR_DEFAULT_ADDR}}"
+}
+
+jobworkerp_addr() {
+  echo "${JW_GRPC_ADDR:-${JOBWORKERP_DEFAULT_ADDR}}"
+}
+
+addr_port() {
+  echo "${1##*:}"
+}
+
+# probe_host <bind-addr>: where to connect to a server bound to <bind-addr>;
+# wildcard binds are reached over IPv4 loopback.
+probe_host() {
+  local host=${1%:*}
+  host=${host#[}
+  host=${host%]}
+  case "${host}" in
+    '' | 0.0.0.0 | :: | localhost) echo 127.0.0.1 ;;
+    *) echo "${host}" ;;
+  esac
+}
+
+# url_of <bind-addr>: the http:// URL to reach a server bound to <bind-addr>.
+url_of() {
+  local host
+  host=$(probe_host "$1")
+  [[ "${host}" == *:* ]] && host="[${host}]"
+  echo "http://${host}:$(addr_port "$1")"
+}
+
+# accepts <bind-addr>: true when the server accepts a TCP connection. Bounded,
+# because a connect to a blackholed address can block for minutes.
+accepts() {
+  # shellcheck disable=SC2016 # expanded by the inner bash
+  timeout 1 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$(probe_host "$1")" "$(addr_port "$1")" \
+    >/dev/null 2>&1
+}
+
+health() {
+  accepts "$(conductor_addr)" && accepts "$(jobworkerp_addr)"
+}
+
+require_seconds() {
+  [[ "$2" =~ ^[0-9]+$ ]] || { log "$1 must be a number of seconds, got '$2'"; exit 2; }
+}
+
+# ---------------------------------------------------------------------------
+# Environment
+
+drop_empty_vars() {
+  local name
+  for name in $(compgen -e); do
+    [[ -z "${!name}" ]] && unset "${name}"
+  done
+  return 0
+}
+
+default_env() {
+  [[ -n "${!1-}" ]] || export "$1=$2"
+}
+
+# Fills conductor's defaults into this shell's environment, which conductor
+# and the bootstrap command inherit.
+set_conductor_env() {
+  default_env GRPC_ADDR "${CONDUCTOR_DEFAULT_ADDR}"
+  default_env SQLITE_URL "sqlite://${DATA_DIR}/conductor.sqlite3"
+  default_env SQLITE_MAX_CONNECTIONS 20
+  default_env NOTIFICATION_TYPE channel
+  # conductor-main refuses to start without the memory cache settings.
+  default_env MEMORY_CACHE_NUM_COUNTERS 12960
+  default_env MEMORY_CACHE_MAX_COST 1000000
+  default_env MEMORY_CACHE_USE_METRICS false
+  # Without RUST_LOG only errors are logged; LOG_USE_STDOUT and LOG_USE_JSON
+  # must both be set or every LOG_ setting is ignored. Log files stay out of
+  # the data volume: their names change with the container IP.
+  default_env RUST_LOG info
+  default_env LOG_USE_STDOUT true
+  default_env LOG_USE_JSON false
+  default_env LOG_FILE_DIR /tmp/conductor-log
+  default_env JOBWORKERP_URL "$(url_of "$(jobworkerp_addr)")"
+  default_env CONDUCTOR_GRPC_URL "$(url_of "$(conductor_addr)")"
+}
+
+# Builds jobworkerp_env (VAR=value words for `env -i`) and conductor_unset
+# (`env -u` options hiding jobworkerp's and this script's variables).
+build_split_env() {
+  local name stripped var
+  declare -gA jobworkerp_set=()
+  jobworkerp_env=()
+  conductor_unset=()
+  for name in "${SHARED_VARS[@]}" $(compgen -e | grep '^LC_' || true); do
+    [[ -n "${!name-}" ]] && jobworkerp_env+=("${name}=${!name}")
+  done
+  # Names that are not valid shell identifiers (e.g. JW_bad-name) are only
+  # visible to env(1), so they are found there.
+  while IFS= read -r var; do
+    name=${var%%=*}
+    case "${name}" in
+      JW_*)
+        conductor_unset+=(-u "${name}")
+        stripped=${name#JW_}
+        if [[ "${stripped}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+          jobworkerp_env+=("${stripped}=${var#*=}")
+          jobworkerp_set[${stripped}]=1
+        else
+          log "ignoring ${name}: ${stripped} is not a valid variable name"
+        fi
+        ;;
+      ALL_IN_ONE_*) conductor_unset+=(-u "${name}") ;;
+    esac
+  done < <(env | grep -E '^(JW_|ALL_IN_ONE_)' || true)
+  jobworkerp_default STORAGE_TYPE Standalone
+  jobworkerp_default GRPC_ADDR "${JOBWORKERP_DEFAULT_ADDR}"
+  jobworkerp_default SQLITE_URL "sqlite://${JOBWORKERP_DIR}/jobworkerp.sqlite3"
+  jobworkerp_default PLUGINS_RUNNER_DIR "${PLUGINS_DIR}"
+  # Lets plugins ship the shared libraries they link next to them.
+  jobworkerp_default LD_LIBRARY_PATH "${PLUGINS_DIR}"
+  jobworkerp_default RUST_LOG info
+  jobworkerp_default LOG_USE_STDOUT true
+  jobworkerp_default LOG_USE_JSON false
+  jobworkerp_default LOG_FILE_DIR /tmp/jobworkerp-log
+}
+
+jobworkerp_default() {
+  [[ -n "${jobworkerp_set[$1]-}" ]] || jobworkerp_env+=("$1=$2")
+}
+
+# ---------------------------------------------------------------------------
+# Processes. Each child leads its own session, so a terminal's Ctrl-C reaches
+# only this script, which then stops the children in order.
+
+jobworkerp_pid=
+conductor_pid=
+bootstrap_pid=
+signaled=0
+
+on_signal() {
+  signaled=1
+}
+
+start_jobworkerp() {
+  setsid env -i -C "${JOBWORKERP_DIR}" "${jobworkerp_env[@]}" "${BIN_DIR}/all-in-one" &
+  jobworkerp_pid=$!
+  log "started jobworkerp pid=${jobworkerp_pid}"
+}
+
+start_conductor() {
+  setsid env -C "${DATA_DIR}" "${conductor_unset[@]}" "${BIN_DIR}/conductor-main" &
+  conductor_pid=$!
+  log "started conductor pid=${conductor_pid}"
+}
+
+start_bootstrap() {
+  setsid env -C "${DATA_DIR}" "${conductor_unset[@]}" "${BIN_DIR}/conductor-main" bootstrap \
+    --jobworkerp-url "${JOBWORKERP_URL}" \
+    --conductor-grpc-url "${CONDUCTOR_GRPC_URL}" \
+    --server-name "${server_name}" \
+    --wait-timeout-sec "${startup_timeout}" &
+  bootstrap_pid=$!
+  log "started bootstrap pid=${bootstrap_pid}"
+}
+
+# wait_listening <name> <pid> <bind-addr>: 0 when listening, 1 when the
+# process exited, 2 on a stop signal, 3 on timeout.
+wait_listening() {
+  local name=$1 pid=$2 addr=$3 deadline=$((SECONDS + startup_timeout))
+  while :; do
+    ((signaled)) && return 2
+    kill -0 "${pid}" 2>/dev/null || return 1
+    accepts "${addr}" && return 0
+    if ((SECONDS >= deadline)); then
+      log "${name} did not accept connections on ${addr} within ${startup_timeout}s"
+      return 3
+    fi
+    sleep "${POLL_INTERVAL}"
+  done
+}
+
+# reap <pid> [interruptible]: waits for the child and sets last_status to its
+# exit status. A trapped signal interrupts `wait`, so it is repeated; with
+# `interruptible` a stop signal returns 1 instead. Results go through a
+# global because `wait` only works in this shell, not in a $(...) subshell.
+last_status=0
+reap() {
+  while :; do
+    last_status=0
+    wait "$1" 2>/dev/null || last_status=$?
+    kill -0 "$1" 2>/dev/null || return 0
+    [[ "${2-}" == interruptible ]] && ((signaled)) && return 1
+  done
+}
+
+# stop_child <name> <pid>: SIGTERM (plus SIGCONT, in case it is stopped), then
+# SIGKILL to its whole process group after ALL_IN_ONE_STOP_TIMEOUT_SEC. Sets
+# last_status.
+stop_child() {
+  local name=$1 pid=$2 deadline
+  last_status=0
+  [[ -n "${pid}" ]] || return 0
+  if kill -0 "${pid}" 2>/dev/null; then
+    log "stopping ${name} pid=${pid}"
+    kill -TERM "${pid}" 2>/dev/null
+    kill -CONT "${pid}" 2>/dev/null
+    deadline=$((SECONDS + stop_timeout))
+    while kill -0 "${pid}" 2>/dev/null; do
+      if ((SECONDS >= deadline)); then
+        log "${name} did not stop within ${stop_timeout}s; killing it"
+        kill -KILL -- "-${pid}" 2>/dev/null
+        break
+      fi
+      sleep "${POLL_INTERVAL}"
+    done
+  fi
+  reap "${pid}"
+  # Processes the child started (e.g. COMMAND jobs) must not outlive it.
+  kill -KILL -- "-${pid}" 2>/dev/null
+  log "${name} exited with ${last_status}"
+}
+
+# shutdown <status>: stops everything in dependency order, then exits with
+# <status>, or with jobworkerp's status when <status> is empty.
+shutdown() {
+  local status=$1
+  stop_child bootstrap "${bootstrap_pid}"
+  stop_child conductor "${conductor_pid}"
+  stop_child jobworkerp "${jobworkerp_pid}"
+  exit "${status:-${last_status}}"
+}
+
+# started <name> <pid> <bind-addr>: waits for the server, or shuts down.
+started() {
+  local result=0
+  wait_listening "$@" || result=$?
+  case "${result}" in
+    0) return 0 ;;
+    1)
+      reap "$2"
+      log "$1 exited with ${last_status} during startup"
+      shutdown "$((last_status == 0 ? 1 : last_status))"
+      ;;
+    2) shutdown "" ;;
+    *) shutdown 1 ;;
+  esac
+}
+
+run() {
+  bootstrap=${ALL_IN_ONE_BOOTSTRAP:-true}
+  startup_timeout=${ALL_IN_ONE_STARTUP_TIMEOUT_SEC:-60}
+  stop_timeout=${ALL_IN_ONE_STOP_TIMEOUT_SEC:-20}
+  server_name=${ALL_IN_ONE_JOBWORKERP_SERVER_NAME-local}
+  require_seconds ALL_IN_ONE_STARTUP_TIMEOUT_SEC "${startup_timeout}"
+  require_seconds ALL_IN_ONE_STOP_TIMEOUT_SEC "${stop_timeout}"
+
+  if ! mkdir -p "${JOBWORKERP_DIR}" "${PLUGINS_DIR}" 2>/dev/null \
+    || [[ ! -w "${DATA_DIR}" || ! -w "${JOBWORKERP_DIR}" ]]; then
+    log "the data directory ${DATA_DIR} is not writable by $(id -un 2>/dev/null || id -u);" \
+      "mount a volume the container user can write"
+    exit 1
+  fi
+  # dotenv searches parent directories, so without its own .env jobworkerp
+  # would read conductor's.
+  [[ -e "${JOBWORKERP_DIR}/.env" ]] || : >"${JOBWORKERP_DIR}/.env"
+
+  drop_empty_vars
+  set_conductor_env
+  build_split_env
+  trap on_signal TERM INT
+
+  start_jobworkerp
+  started jobworkerp "${jobworkerp_pid}" "$(jobworkerp_addr)"
+  start_conductor
+  started conductor "${conductor_pid}" "$(conductor_addr)"
+  log "both servers are ready"
+
+  if [[ "${bootstrap}" == true ]]; then
+    start_bootstrap
+    reap "${bootstrap_pid}" interruptible || shutdown ""
+    if ((last_status != 0)); then
+      log "bootstrap failed with ${last_status}"
+      shutdown "${last_status}"
+    fi
+    bootstrap_pid=
+  fi
+
+  local done_pid status
+  while :; do
+    done_pid=
+    status=0
+    wait -n -p done_pid "${jobworkerp_pid}" "${conductor_pid}" || status=$?
+    ((signaled)) && shutdown ""
+    [[ -n "${done_pid}" ]] || continue
+    if [[ "${done_pid}" == "${jobworkerp_pid}" ]]; then
+      log "jobworkerp exited with ${status}"
+      jobworkerp_pid=
+    else
+      log "conductor exited with ${status}"
+      conductor_pid=
+    fi
+    shutdown "${status}"
+  done
+}
+
+case "${1-run}" in
+  run) run ;;
+  health) health ;;
+  *) exec "$@" ;;
+esac

@@ -11,7 +11,6 @@ use proto::jobworkerp_conductor::data::{ExecutionRef, ExecutionSourceType, Jobwo
 use std::ops::Deref;
 use std::sync::Arc;
 use std::vec;
-use tokio::select;
 use tokio::task::JoinSet;
 
 #[derive(Clone)]
@@ -25,9 +24,9 @@ impl JobworkerpResultListener {
             workflow_list: listeners,
         })
     }
+    /// Runs every listener; it returns only when there is none, so callers
+    /// stop it by dropping the future.
     pub async fn listen_all(&self) -> Result<()> {
-        // spawn all listen tasks for each worker in workflow_map in parallel
-        let mut tasks = vec![];
         let mut set = JoinSet::new();
 
         for workflow_setting in self.workflow_list.iter().cloned() {
@@ -38,16 +37,16 @@ impl JobworkerpResultListener {
                 &workflow_setting.listen_jobworkerp.address(),
                 &workflow_setting.process_jobworkerp.address(),
             );
-            // spawn listen tasks
-            let task = set.spawn(async move { Self::listen(workflow_setting).await });
-            tasks.push(task);
+            set.spawn(async move { Self::listen(workflow_setting).await });
         }
-        let results = set.join_all().await;
-        for task in results.into_iter() {
-            task?;
+        for result in set.join_all().await {
+            result?;
         }
         Ok(())
     }
+
+    /// Listens to job results of one worker, reconnecting on errors. It never
+    /// returns on its own; callers stop it by dropping the future.
     pub async fn listen(workflow_setting: JobResultListenerSetting) -> Result<()> {
         let listen_worker_name = Arc::new(workflow_setting.listen_worker_name.clone());
         let listen_workflow_settings = Arc::new(workflow_setting);
@@ -82,34 +81,22 @@ impl JobworkerpResultListener {
 
             // watch job result stream until disconnected
             loop {
-                select! {
-                    res = stream.message() => {
-                    match res {
-                        Ok(Some(job_result)) => {
-                            // for move
-                            let listen_workflow_settings = listen_workflow_settings.clone();
-                            tokio::spawn(async move {
-                                match Self::handle_job_result(
-                                    listen_workflow_settings, &job_result
-                                ).await {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        tracing::error!("handle_job_result error: {:?}", e);
-                                    }
-                                }
-                            });
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            tracing::error!("Stream error: {:?}", e);
-                            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                            break;
-                        }
+                match stream.message().await {
+                    Ok(Some(job_result)) => {
+                        let listen_workflow_settings = listen_workflow_settings.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                Self::handle_job_result(listen_workflow_settings, &job_result).await
+                            {
+                                tracing::error!("handle_job_result error: {:?}", e);
+                            }
+                        });
                     }
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        tracing::info!("Received Ctrl-C, breaking the loop");
-                        return Ok(());
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("Stream error: {:?}", e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                        break;
                     }
                 }
             }
